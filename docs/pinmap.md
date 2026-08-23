@@ -77,7 +77,7 @@ STM32 GND = TB6612FNG GND = 모터 배터리 (-)
 | 우측 모터 방향 1 | D7 | PA8 | GPIO Output | TB6612FNG BIN1 |
 | 우측 모터 방향 2 | D8 | PA9 | GPIO Output | TB6612FNG BIN2 |
 | 모터 드라이버 활성화 | D3 | PB3 | GPIO Output | TB6612FNG STBY |
-| IR 리모컨 수신 | D2 | PA10 | GPIO EXTI | IR 수신기 OUT |
+| IR 리모컨 수신 | D2 | PA10 | TIM1_CH3 Input Capture | IR 수신기 OUT |
 | UART TX | D1 | PA2 | USART2_TX | ST-LINK Virtual COM |
 | UART RX | D0 | PA3 | USART2_RX | ST-LINK Virtual COM |
 
@@ -121,8 +121,10 @@ GPIO Output
 - PA9: MOTOR_R_IN2
 - PB3: MOTOR_STBY
 
-GPIO EXTI
-- PA10: IR_REMOTE_OUT
+TIM1
+- Channel 3: Input Capture
+- PA10: IR_REMOTE_IN
+- TIM1 Capture/Compare Interrupt 활성화
 ```
 
 ## 전원 연결

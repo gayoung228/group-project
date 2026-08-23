@@ -1,5 +1,5 @@
 #include "car_control.h"
 
-int main() {
+void carControlInit(void) {
     // something about car hw control
 }
