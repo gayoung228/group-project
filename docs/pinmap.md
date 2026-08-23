@@ -1,0 +1,1 @@
+test pinmap ver.01
