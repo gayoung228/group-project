@@ -42,14 +42,21 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined library search paths
 )
 
+file(GLOB_RECURSE SRC_FILES1 "app/*.c")
+file(GLOB_RECURSE SRC_FILES2 "hw/*.c")
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
+    ${SRC_FILES1}
+    ${SRC_FILES2}
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
+    app
+    hw
+    hw/driver
 )
 
 # Add project symbols (macros)
