@@ -5,6 +5,6 @@
 
 void carControlInit(void);
 void carControlUpdate(void);
-void carControlExecute(const DriveCommand *command);
+void carControlExecute(const drive_command_t *command);
 
 #endif 

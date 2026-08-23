@@ -49,6 +49,8 @@ extern "C" {
 
 /* USER CODE END EM */
 
+void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
+
 /* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
 
@@ -65,12 +67,26 @@ void Error_Handler(void);
 #define USART_RX_GPIO_Port GPIOA
 #define LD2_Pin GPIO_PIN_5
 #define LD2_GPIO_Port GPIOA
+#define MOTOR_L_PWM_Pin GPIO_PIN_10
+#define MOTOR_L_PWM_GPIO_Port GPIOB
+#define MOTOR_R_PWM_Pin GPIO_PIN_7
+#define MOTOR_R_PWM_GPIO_Port GPIOC
+#define MOTOR_R_IN1_Pin GPIO_PIN_8
+#define MOTOR_R_IN1_GPIO_Port GPIOA
+#define MOTOR_R_IN2_Pin GPIO_PIN_9
+#define MOTOR_R_IN2_GPIO_Port GPIOA
+#define IR_REMOTE_IN_Pin GPIO_PIN_10
+#define IR_REMOTE_IN_GPIO_Port GPIOA
 #define TMS_Pin GPIO_PIN_13
 #define TMS_GPIO_Port GPIOA
 #define TCK_Pin GPIO_PIN_14
 #define TCK_GPIO_Port GPIOA
-#define SWO_Pin GPIO_PIN_3
-#define SWO_GPIO_Port GPIOB
+#define MOTOR_STBY_Pin GPIO_PIN_3
+#define MOTOR_STBY_GPIO_Port GPIOB
+#define MOTOR_L_IN2_Pin GPIO_PIN_4
+#define MOTOR_L_IN2_GPIO_Port GPIOB
+#define MOTOR_L_IN1_Pin GPIO_PIN_5
+#define MOTOR_L_IN1_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 
