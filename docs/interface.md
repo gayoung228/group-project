@@ -9,7 +9,7 @@
 | HC-SR04      | 초음파 센서 초기화           | `hcsr04_init()`         | 없음      | `void`    |
 | HC-SR04      | 장애물 거리 측정             | `hcsr04_get_distance()`  | 없음      |`uint32_t` |
 | IR Remote    | 리모컨 초기화                | `ir_remote_init()`     | 없음      | `void`    |
-| IR Remote    | ???                         | `ir_remote_update()`   | 없음  |`RemoteCommand`|
+| IR Remote    | 주기적 신호 탐색            | `ir_remote_update()`   | 없음  |`RemoteCommand`|
 | IR Remote    | true와 함께 전달            | `ir_remote_take_command()` | 없음  |`RemoteCommand`|
 | IR Remote    | 원시 버튼 코드를 전달        | `ir_remote_on_raw_code()` | 없음  |`RemoteCommand`|
 | Encoder      | 엔코더 초기화                | `encoder_init()`        | 없음      |`void`    |
