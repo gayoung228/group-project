@@ -10,7 +10,11 @@ typedef enum
     DRIVE_CMD_FORWARD,
     DRIVE_CMD_BACKWARD,
     DRIVE_CMD_LEFT,
-    DRIVE_CMD_RIGHT
+    DRIVE_CMD_RIGHT,
+    // DRIVE_CMD_SPEED_UP: 속도 증가 버튼을 눌렀음
+    DRIVE_CMD_SPEED_UP,
+    // DRIVE_CMD_SPEED_DOWN: 속도 감소 버튼을 눌렀음
+    DRIVE_CMD_SPEED_DOWN
 } drive_command_t;
 
 #endif
