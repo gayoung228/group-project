@@ -1,5 +1,5 @@
-build/ //빌드 결과물 제외
+build/
 
 # IDE settings
-.vscode/ //vs code 개인 설정 제외
-.settings/ //eclipse 계열 IDE 설정 제외
+.vscode/
+.settings/

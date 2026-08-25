@@ -32,3 +32,52 @@ speed:
 0    → 정지
 
 ---
+
+## 1. Motor Interface
+| 모듈 | 담당 기능 | 외부 제공 함수 | 입력 | 반환값 |
+|---|---|---|---|---|
+| Motor | 모터 초기화 | `Motor_Init()` | 없음 | `void` |
+| Motor | 개별 모터 방향 설정 | `Motor_SetDirection()` | `motor_t motor`, `motor_direction_t direction` | `void` |
+| Motor | 개별 모터 속도 설정 | `Motor_SetSpeed()` | `motor_t motor`, `uint8_t speed` | `void` |
+| Motor | 모터 방향 및 속도 제어 | `Motor_Control()` | `motor_t motor`, `motor_direction_t direction`, `uint8_t speed` | `void` |
+| Motor | 좌/우 모터 전체 정지 | `Motor_StopAll()` | 없음 | `void` |
+
+
+## 2. Drive Interface
+| 모듈 | 담당 기능 | 외부 제공 함수 | 입력 | 반환값 |
+|---|---|---|---|---|
+| Drive | 주행 모듈 초기화 | `Drive_Init()` | 없음 | `void` |
+| Drive | 차량 주행 명령 실행 | `Drive_Control()` | `drive_command_t command` | `void` |
+| Drive | 기본 주행 속도 설정 | `Drive_SetSpeed()` | `uint8_t speed` | `void` |
+| Drive | 차량 정지 | `Drive_Stop()` | 없음 | `void` |
+
+### Drive Command
+- `DRIVE_CMD_STOP`: 정지
+- `DRIVE_CMD_FORWARD`: 전진
+- `DRIVE_CMD_BACKWARD`: 후진
+- `DRIVE_CMD_LEFT`: 좌회전
+- `DRIVE_CMD_RIGHT`: 우회전
+
+
+## 3. IR Remote Interface
+| 모듈 | 담당 기능 | 외부 제공 함수 | 입력 | 반환값 |
+|---|---|---|---|---|
+| IR Remote | IR 리모컨 모듈 초기화 | `IR_Remote_Init()` | 없음 | `void` |
+| IR Remote | IR 원시 데이터 수신 | `IR_Remote_GetRawCode()` | 없음 | `uint32_t` |
+| IR Remote | IR 코드를 주행 명령으로 변환 | `IR_Remote_ConvertCommand()` | `uint32_t raw_code` | `drive_command_t` |
+| IR Remote | IR 입력에 해당하는 주행 명령 반환 | `IR_Remote_GetCommand()` | 없음 | `drive_command_t` |
+
+### IR Command Mapping
+| IR 입력 | 변환되는 주행 명령 |
+|---|---|
+| Forward | `DRIVE_CMD_FORWARD` |
+| Backward | `DRIVE_CMD_BACKWARD` |
+| Left | `DRIVE_CMD_LEFT` |
+| Right | `DRIVE_CMD_RIGHT` |
+| Stop | `DRIVE_CMD_STOP` |
+| 입력 없음 / 알 수 없는 입력 | `DRIVE_CMD_NONE` |
+
+## 4. 모듈 호출 관계
+IR Remote 모듈은 Motor 모듈을 직접 제어하지 않는다.
+주행 제어는 반드시 `Drive_Control()`을 통해 수행한다.
+`IR Remote → drive_command_t → Drive_Control() → Motor_Control() → PWM / Direction`
