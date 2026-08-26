@@ -9,35 +9,20 @@ void ap_init(void)
 
 void ap_main(void)
 {
-    // 왼쪽 모터 30%
-    motor_control(MOTOR_LEFT, MOTOR_FORWARD, 30);
-    HAL_Delay(3000);
-    motor_stop_all();
-    HAL_Delay(1000);
-
-    // 왼쪽 모터 60%
-    motor_control(MOTOR_LEFT, MOTOR_FORWARD, 60);
-    HAL_Delay(3000);
-    motor_stop_all();
-    HAL_Delay(1000);
-
-    // 오른쪽 모터 30%
-    motor_control(MOTOR_RIGHT, MOTOR_FORWARD, 30);
-    HAL_Delay(3000);
-    motor_stop_all();
-    HAL_Delay(1000);
-
-    // 오른쪽 모터 60%
-    motor_control(MOTOR_RIGHT, MOTOR_FORWARD, 60);
-    HAL_Delay(3000);
-    motor_stop_all();
-    HAL_Delay(1000);
-
-    // 양쪽 모터 50%
-    motor_control(MOTOR_LEFT, MOTOR_FORWARD, 50);
-    motor_control(MOTOR_RIGHT, MOTOR_FORWARD, 50);
+    // 양쪽 모터를 정방향 100%로 출발
+    motor_control(MOTOR_LEFT,  MOTOR_FORWARD, 100);
+    motor_control(MOTOR_RIGHT, MOTOR_FORWARD, 100);
     HAL_Delay(3000);
 
-    // 테스트 종료
+    // 양쪽 모터 속도를 90%부터 10%까지 단계적으로 감소
+    for (int speed = 90; speed >= 10; speed -= 10)
+    {
+        motor_set_speed(MOTOR_LEFT,  speed);
+        motor_set_speed(MOTOR_RIGHT, speed);
+
+        HAL_Delay(3000);
+    }
+
+    // 양쪽 모터 정지
     motor_stop_all();
 }
