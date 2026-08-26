@@ -10,9 +10,9 @@ void Motor_Init(void) {
   HAL_GPIO_WritePin(MOTOR_STBY_GPIO_Port, MOTOR_STBY_Pin, GPIO_PIN_SET);
 
   // Motor stop
-  HAL_GPIO_WritePin(MOTOR_L_IN1_GPIO_Port, MOTOR_L_IN1_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(MOTOR_A_IN1_GPIO_Port, MOTOR_A_IN1_Pin, GPIO_PIN_RESET);
 
-  HAL_GPIO_WritePin(MOTOR_L_IN2_GPIO_Port, MOTOR_L_IN2_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(MOTOR_A_IN2_GPIO_Port, MOTOR_A_IN2_Pin, GPIO_PIN_RESET);
 
   // start PWM
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
@@ -29,14 +29,14 @@ void Motor_SetSpeed(motor_t motor, uint8_t speed)
         speed = 100;
 
     HAL_GPIO_WritePin(
-        MOTOR_L_IN1_GPIO_Port,
-        MOTOR_L_IN1_Pin,
+        MOTOR_A_IN1_GPIO_Port,
+        MOTOR_A_IN1_Pin,
         GPIO_PIN_SET
     );
 
     HAL_GPIO_WritePin(
-        MOTOR_L_IN2_GPIO_Port,
-        MOTOR_L_IN2_Pin,
+        MOTOR_A_IN2_GPIO_Port,
+        MOTOR_A_IN2_Pin,
         GPIO_PIN_RESET
     );
 
