@@ -1,28 +1,58 @@
+#include "main.h"
 #include "ap_main.h"
-#include "motor.h"
+#include "drive.h"
 #include "stm32f4xx_hal.h"
 
-void ap_init(void)
-{
-    motor_init();
+/* 기본 주행 속도 [%] */
+#define DRIVE_SPEED         80
+
+/* 회전 속도 [%] : 제자리 회전은 마찰이 커서 직진보다 높게 준다 */
+#define TURN_SPEED          100
+
+/* 동작 사이의 대기 시간 [ms] */
+#define ACTION_TIME         1500
+#define TURN_TIME           700
+#define PAUSE_TIME          500
+
+
+/* 애플리케이션에서 사용하는 모듈들을 초기화한다. */
+void ap_init(void) {
+    drive_init();
 }
 
-void ap_main(void)
-{
-    // 양쪽 모터를 정방향 100%로 출발
-    motor_control(MOTOR_LEFT,  MOTOR_FORWARD, 100);
-    motor_control(MOTOR_RIGHT, MOTOR_FORWARD, 100);
-    HAL_Delay(3000);
+/* 애플리케이션 메인 루프.
+ * 전진 / 후진 / 좌회전 / 우회전 / 정지와 PWM 속도 변화를 순서대로 확인한다. */
+void ap_main(void) {
+    HAL_Delay(5000);
 
-    // 양쪽 모터 속도를 90%부터 10%까지 단계적으로 감소
-    for (int speed = 90; speed >= 10; speed -= 10)
+    while (1)
     {
-        motor_set_speed(MOTOR_LEFT,  speed);
-        motor_set_speed(MOTOR_RIGHT, speed);
+        /* 전진 */
+        drive_forward(TURN_SPEED);
+        HAL_Delay(ACTION_TIME);
 
-        HAL_Delay(3000);
+        drive_stop();
+        HAL_Delay(PAUSE_TIME);
+
+        /* 후진 */
+        drive_backward(TURN_SPEED);
+        HAL_Delay(ACTION_TIME);
+
+        drive_stop();
+        HAL_Delay(PAUSE_TIME);
+
+        /* 좌회전 */
+        drive_turn_left(TURN_SPEED);
+        HAL_Delay(TURN_TIME);
+
+        drive_stop();
+        HAL_Delay(PAUSE_TIME);
+
+        /* 우회전 */
+        drive_turn_right(TURN_SPEED);
+        HAL_Delay(TURN_TIME);
+
+        drive_stop();
+        HAL_Delay(2000);
     }
-
-    // 양쪽 모터 정지
-    motor_stop_all();
 }
