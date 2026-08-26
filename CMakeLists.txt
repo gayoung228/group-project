@@ -57,6 +57,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     app
     hw
     hw/driver
+    hw/control
 )
 
 # Add project symbols (macros)
