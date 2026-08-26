@@ -3,40 +3,32 @@
 
 #include <stdint.h>
 
-typedef enum{
+typedef enum
+{
     MOTOR_LEFT = 0,
     MOTOR_RIGHT
 } motor_t;
 
-typedef enum{
+typedef enum
+{
     MOTOR_STOP = 0,
     MOTOR_FORWARD,
     MOTOR_REVERSE
 } motor_direction_t;
 
-/* 모터 제어 초기화
-   - PWM 시작
-   - 필요 시 GPIO 초기 상태 설정 */
+// 모터 방향 핀을 정지 상태로 만들고 좌우 PWM을 시작한다.
 void motor_init(void);
 
-/* 개별 모터 방향 설정
-
-   motor     : MOTOR_LEFT / MOTOR_RIGHT
-   direction : MOTOR_FORWARD / MOTOR_REVERSE / MOTOR_STOP  */
+// 선택한 모터의 회전 방향을 설정한다.
 void motor_set_direction(motor_t motor, motor_direction_t direction);
 
-
-/* 개별 모터 속도 설정
-  
-   speed 범위 : 0 ~ 100 (%)
-   0          : 정지
-   100        : 최대 속도 */
+// 선택한 모터의 속도를 0~100% 범위로 설정한다.
 void motor_set_speed(motor_t motor, uint8_t speed);
 
-// 모터 방향 + 속도를 한 번에 설정
+// 선택한 모터의 방향과 속도를 함께 설정한다.
 void motor_control(motor_t motor, motor_direction_t direction, uint8_t speed);
 
-//좌/우 모터 모두 정지
+// 좌우 모터를 모두 정지한다.
 void motor_stop_all(void);
 
 #endif
