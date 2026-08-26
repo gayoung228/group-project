@@ -70,12 +70,12 @@ STM32 GND = TB6612FNG GND = 모터 배터리 (-)
 
 | 기능 | Nucleo 핀 | STM32 핀 | CubeMX 설정 | 연결 대상 |
 |---|---|---|---|---|
-| 좌측 모터 PWM | D6 | PB10 | TIM2_CH3 PWM | TB6612FNG PWMA |
-| 우측 모터 PWM | D9 | PC7 | TIM3_CH2 PWM | TB6612FNG PWMB |
-| 좌측 모터 방향 1 | D4 | PB5 | GPIO Output | TB6612FNG AIN1 |
-| 좌측 모터 방향 2 | D5 | PB4 | GPIO Output | TB6612FNG AIN2 |
-| 우측 모터 방향 1 | D7 | PA8 | GPIO Output | TB6612FNG BIN1 |
-| 우측 모터 방향 2 | D8 | PA9 | GPIO Output | TB6612FNG BIN2 |
+| 모터 A PWM | D6 | PB10 | TIM2_CH3 PWM | TB6612FNG PWMA |
+| 모터 B PWM | D9 | PC7 | TIM3_CH2 PWM | TB6612FNG PWMB |
+| 모터 A 방향 1 | D4 | PB5 | GPIO Output | TB6612FNG AIN1 |
+| 모터 A 방향 2 | D5 | PB4 | GPIO Output | TB6612FNG AIN2 |
+| 모터 B 방향 1 | D7 | PA8 | GPIO Output | TB6612FNG BIN1 |
+| 모터 B 방향 2 | D8 | PA9 | GPIO Output | TB6612FNG BIN2 |
 | 모터 드라이버 활성화 | D3 | PB3 | GPIO Output | TB6612FNG STBY |
 | IR 리모컨 수신 | D2 | PA10 | TIM1_CH3 Input Capture | IR 수신기 OUT |
 | UART TX | D1 | PA2 | USART2_TX | ST-LINK Virtual COM |
