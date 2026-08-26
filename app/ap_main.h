@@ -1,4 +1,4 @@
 #include "main.h"
 
-void apInit(void);
-void apMain(void);
+void ap_init(void);
+void ap_main(void);

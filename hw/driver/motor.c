@@ -6,7 +6,7 @@ extern TIM_HandleTypeDef htim2;
 #define MOTOR_PWM_MAX htim2.Init.Period // ARR?
 
 // 일단 왼쪽만
-void Motor_Init(void) {
+void motor_init(void) {
   HAL_GPIO_WritePin(MOTOR_STBY_GPIO_Port, MOTOR_STBY_Pin, GPIO_PIN_SET);
 
   // Motor stop
@@ -23,7 +23,7 @@ void Motor_Init(void) {
 
 // 일단 왼쪽만
 // speed 0 ~ 100
-void Motor_SetSpeed(motor_t motor, uint8_t speed)
+void motor_set_speed(motor_t motor, uint8_t speed)
 {
     if (speed > 100)
         speed = 100;
