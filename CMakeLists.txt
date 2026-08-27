@@ -42,8 +42,9 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined library search paths
 )
 
-file(GLOB_RECURSE SRC_FILES1 "app/*.c")
-file(GLOB_RECURSE SRC_FILES2 "hw/*.c")
+# 새 모듈 파일이 추가되면 CMake가 자동으로 소스 목록을 다시 확인한다.
+file(GLOB_RECURSE SRC_FILES1 CONFIGURE_DEPENDS "app/*.c")
+file(GLOB_RECURSE SRC_FILES2 CONFIGURE_DEPENDS "hw/*.c")
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
