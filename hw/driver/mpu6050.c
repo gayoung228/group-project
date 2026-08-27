@@ -54,6 +54,16 @@ static int16_t mpu6050_gyro_raw_x = 0;
 static int16_t mpu6050_gyro_raw_y = 0;
 static int16_t mpu6050_gyro_raw_z = 0;
 
+/* 기준 자세 대비 누적된 상대 회전각 (degree).
+ * mpu6050_orientation_reset()으로 0도로 되돌리고, mpu6050_orientation_update()가 갱신한다. */
+static float mpu6050_roll_deg  = 0.0f;
+static float mpu6050_pitch_deg = 0.0f;
+static float mpu6050_yaw_deg   = 0.0f;
+
+/* orientation 적분에 사용하는 이전 호출 시각(ms)과 시작 여부 */
+static uint32_t mpu6050_orientation_last_tick = 0;
+static bool     mpu6050_orientation_started   = false;
+
 
 /* 레지스터를 읽는 내부 함수 */
 static bool mpu6050_read_regs(uint8_t reg, uint8_t *buf, uint16_t len)
@@ -228,4 +238,62 @@ bool mpu6050_start(void)
     HAL_Delay(MPU6050_CALIB_WARMUP_TIME);
 
     return mpu6050_calibrate_gyro(300);
+}
+
+/* 현재 자세를 기준(Roll/Pitch/Yaw = 0도)으로 재설정 */
+void mpu6050_orientation_reset(void)
+{
+    mpu6050_roll_deg  = 0.0f;
+    mpu6050_pitch_deg = 0.0f;
+    mpu6050_yaw_deg   = 0.0f;
+
+    mpu6050_orientation_last_tick = HAL_GetTick();
+    mpu6050_orientation_started   = true;
+}
+
+/* 최근 mpu6050_update() 결과(보정된 gyro dps)를 실제 dt로 적분하여 Roll/Pitch/Yaw를 누적.
+ * I2C를 다시 읽지 않으므로, 최신 값을 쌓으려면 호출자가 mpu6050_update()를 먼저(또는 같은 주기로) 불러야 한다. */
+bool mpu6050_orientation_update(void)
+{
+    uint32_t now_tick;
+    float dt_s;
+
+    if (!mpu6050_ready)
+    {
+        return false;
+    }
+
+    now_tick = HAL_GetTick();
+
+    if (!mpu6050_orientation_started)
+    {
+        /* orientation_reset()을 먼저 부르지 않았다면 이번 호출 시각을 기준으로 삼는다 */
+        mpu6050_orientation_last_tick = now_tick;
+        mpu6050_orientation_started   = true;
+        return true;
+    }
+
+    dt_s = (now_tick - mpu6050_orientation_last_tick) / 1000.0f;
+    mpu6050_orientation_last_tick = now_tick;
+
+    mpu6050_roll_deg  += mpu6050_last_data.gyro_x_dps * dt_s;
+    mpu6050_pitch_deg += mpu6050_last_data.gyro_y_dps * dt_s;
+    mpu6050_yaw_deg   += mpu6050_last_data.gyro_z_dps * dt_s;
+
+    return true;
+}
+
+/* 기준 자세 대비 현재 상대 Roll/Pitch/Yaw(degree)를 반환 */
+bool mpu6050_get_orientation(float *roll_deg, float *pitch_deg, float *yaw_deg)
+{
+    if (!mpu6050_ready || roll_deg == NULL || pitch_deg == NULL || yaw_deg == NULL)
+    {
+        return false;
+    }
+
+    *roll_deg  = mpu6050_roll_deg;
+    *pitch_deg = mpu6050_pitch_deg;
+    *yaw_deg   = mpu6050_yaw_deg;
+
+    return true;
 }

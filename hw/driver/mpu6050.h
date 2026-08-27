@@ -30,4 +30,13 @@ bool mpu6050_is_ready(void);  // MPU6050 초기화 및 통신 가능 여부를 �
 // MPU6050 초기화 + 워밍업 대기 + 자이로 영점 보정을 한 번에 수행
 bool mpu6050_start(void);
 
+// 현재 자세를 기준(Roll/Pitch/Yaw = 0도)으로 재설정
+void mpu6050_orientation_reset(void);
+
+// 최근 mpu6050_update() 결과(보정된 gyro dps)를 실제 dt로 적분하여 Roll/Pitch/Yaw를 누적
+bool mpu6050_orientation_update(void);
+
+// 기준 자세 대비 현재 상대 Roll/Pitch/Yaw(degree)를 반환
+bool mpu6050_get_orientation(float *roll_deg, float *pitch_deg, float *yaw_deg);
+
 #endif

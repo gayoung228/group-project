@@ -54,5 +54,7 @@ void ap_main(void) {
 
         drive_stop();
         HAL_Delay(2000);
+        //MPU6050에서 최신 가속도와 자이로 데이터를 읽음 
+        mpu6050_update();
     }
 }
