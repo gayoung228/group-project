@@ -23,7 +23,7 @@
 #define PRINT_PERIOD_MS         200
 
 /* 목표 주행 거리 [mm] : 0 이면 거리 제한 없이 계속 달린다 */
-#define TARGET_DISTANCE_MM      2000000
+#define TARGET_DISTANCE_MM      8000
 
 /* ★ encoder.c 의 ENCODER_SLOTS_PER_REV 과 같은 값이어야 한다 ★ */
 #define SLOTS_PER_REV           20
@@ -107,14 +107,16 @@ static void print_mode(void)
  * yaw 오차와 보정량을 함께 봐야 제어가 동작하는지 알 수 있다. */
 static void print_status(void)
 {
-    printf("%5dmm | yaw tgt:%5d cur:%5d err:%5d corr:%5d | rpm L:%4d R:%4d\r\n",
+    printf("%5dmm | yaw tgt:%5d cur:%5d err:%5d corr:%5d | rpm L:%4d R:%4d | out L:%4d R:%4d\r\n",
            (int)get_distance_mm(),
            (int)heading_get_target(),
            (int)heading_get_current(),
            (int)heading_get_error(),
            (int)heading_get_correction(),
            (int)wheel_get_rpm(WHEEL_LEFT),
-           (int)wheel_get_rpm(WHEEL_RIGHT));
+           (int)wheel_get_rpm(WHEEL_RIGHT),
+           (int)drive_get_left_speed(),
+           (int)drive_get_right_speed());
 }
 
 /* 주행이 끝난 뒤 결과를 정리해서 출력한다. */
@@ -144,16 +146,17 @@ static void print_result(void)
 /* 주행을 시작한다. */
 static void start_run(void)
 {
-    encoder_reset();
+    /* 이전 주행의 PID 상태와 출발 오류를 모두 초기화한다. */
+    wheel_reset();
     heading_reset();
 
     start_tick = HAL_GetTick();
     run_state  = RUN_ACTIVE;
 
+    drive_forward(run_speed);
+
     printf("\r\n>>> START\r\n");
     print_mode();
-
-    drive_forward(run_speed);
 }
 
 /* 주행을 멈추고 결과를 출력한다. */
@@ -290,6 +293,18 @@ void ap_main(void)
             control_tick += CONTROL_PERIOD_MS;
 
             drive_update(CONTROL_PERIOD_MS);
+
+            if ((run_state == RUN_ACTIVE) && wheel_has_startup_fault())
+            {
+                printf("\r\n>>> WHEEL START FAILED\r\n");
+                finish_run();
+            }
+
+            if ((run_state == RUN_ACTIVE) && heading_has_runaway_fault())
+            {
+                printf("\r\n>>> HEADING ERROR: YAW OVER 45 DEG\r\n");
+                finish_run();
+            }
 
             /* 목표 거리에 도달하면 스스로 멈춘다 */
             if ((run_state == RUN_ACTIVE) &&

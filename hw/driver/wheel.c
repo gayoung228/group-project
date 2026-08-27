@@ -41,6 +41,9 @@
 #define WHEEL_SYNC_KP           0.5f
 #define WHEEL_SYNC_LIMIT        10.0f
 
+/* 출발 후 이 시간 안에 양쪽 엔코더 펄스가 모두 들어와야 한다. */
+#define WHEEL_STARTUP_TIMEOUT_MS 500U
+
 /* 바퀴 개수 */
 #define WHEEL_COUNT             2
 
@@ -80,6 +83,11 @@ static float wheel_kd = WHEEL_DEFAULT_KD;
 
 /* 폐루프 제어 사용 여부 */
 static bool wheel_enabled = true;
+
+/* 출발 시 양쪽 바퀴가 모두 움직이기 시작했는지 확인하는 상태 */
+static bool     wheel_starting = false;
+static bool     wheel_startup_fault = false;
+static uint32_t wheel_start_tick = 0;
 
 
 /* 실수값을 지정한 범위 안으로 잘라주는 내부 함수 */
@@ -186,6 +194,7 @@ static void wheel_apply_sync(void)
     float correction;
     float left_magnitude;
     float right_magnitude;
+    float target_difference;
 
     if ((wheel_state[WHEEL_LEFT].target_rpm == 0.0f) ||
         (wheel_state[WHEEL_RIGHT].target_rpm == 0.0f))
@@ -198,6 +207,15 @@ static void wheel_apply_sync(void)
 
     /* 좌우가 서로 반대로 돌아야 하는 회전 명령에는 직진 동기화를 적용하지 않는다. */
     if (left_direction != right_direction)
+    {
+        return;
+    }
+
+    /* 자이로 제어가 의도적으로 좌우 RPM을 다르게 주는 동안에는
+     * 엔코더 누적 펄스 동기화를 끄어서 두 제어기가 서로 방해하지 않게 한다. */
+    target_difference = wheel_state[WHEEL_LEFT].target_rpm
+                      - wheel_state[WHEEL_RIGHT].target_rpm;
+    if ((target_difference > 0.1f) || (target_difference < -0.1f))
     {
         return;
     }
@@ -254,6 +272,10 @@ void wheel_reset(void)
         wheel_state[wheel].output       = 0;
     }
 
+    wheel_starting = false;
+    wheel_startup_fault = false;
+    wheel_start_tick = 0;
+
     encoder_reset();
 }
 
@@ -278,6 +300,56 @@ void wheel_update(uint32_t elapsed_time_ms)
         {
             wheel_state[wheel].measured_rpm = wheel_read_rpm(wheel);
         }
+        return;
+    }
+
+    /* 출발 직후에는 PID가 큰 정지 RPM 오차로 100%를 내지 않게
+     * 양쪽을 기준 출력 90%로 동시에 출발시킨다. */
+    if (wheel_starting == true)
+    {
+        bool left_started  = (encoder_get_count(ENCODER_LEFT) != 0);
+        bool right_started = (encoder_get_count(ENCODER_RIGHT) != 0);
+
+        if (left_started && right_started)
+        {
+            /* 두 바퀴가 모두 움직이면 다음 계산부터 PID로 전환한다. */
+            wheel_starting = false;
+
+            for (wheel = WHEEL_LEFT; wheel < WHEEL_COUNT; wheel++)
+            {
+                wheel_state[wheel].integral = 0.0f;
+                wheel_state[wheel].prev_error = 0.0f;
+            }
+        }
+        else if ((HAL_GetTick() - wheel_start_tick) >= WHEEL_STARTUP_TIMEOUT_MS)
+        {
+            /* 한쪽이 시작하지 않으면 재시동하지 않고 오류를 고정한다. */
+            wheel_starting = false;
+            wheel_startup_fault = true;
+            wheel_stop();
+            return;
+        }
+        else
+        {
+            int16_t left_output = (wheel_state[WHEEL_LEFT].target_rpm >= 0.0f)
+                                ? WHEEL_DEFAULT_OUTPUT : -WHEEL_DEFAULT_OUTPUT;
+            int16_t right_output = (wheel_state[WHEEL_RIGHT].target_rpm >= 0.0f)
+                                 ? WHEEL_DEFAULT_OUTPUT : -WHEEL_DEFAULT_OUTPUT;
+
+            wheel_state[WHEEL_LEFT].measured_rpm  = wheel_read_rpm(WHEEL_LEFT);
+            wheel_state[WHEEL_RIGHT].measured_rpm = wheel_read_rpm(WHEEL_RIGHT);
+            wheel_state[WHEEL_LEFT].output  = left_output;
+            wheel_state[WHEEL_RIGHT].output = right_output;
+
+            motor_set_output(MOTOR_LEFT, left_output);
+            motor_set_output(MOTOR_RIGHT, right_output);
+            return;
+        }
+    }
+
+    if (wheel_startup_fault == true)
+    {
+        wheel_stop();
         return;
     }
 
@@ -317,8 +389,30 @@ void wheel_set_target_rpm(wheel_t wheel, float target_rpm)
 /* 좌우 바퀴의 목표 회전 속도를 한 번에 설정한다. */
 void wheel_set_target_rpm_both(float left_rpm, float right_rpm)
 {
+    bool was_stopped;
+
+    if (wheel_startup_fault == true)
+    {
+        return;
+    }
+
+    was_stopped = (wheel_state[WHEEL_LEFT].target_rpm == 0.0f) &&
+                  (wheel_state[WHEEL_RIGHT].target_rpm == 0.0f);
+
     wheel_set_target_rpm(WHEEL_LEFT,  left_rpm);
     wheel_set_target_rpm(WHEEL_RIGHT, right_rpm);
+
+    if (was_stopped && (left_rpm != 0.0f) && (right_rpm != 0.0f))
+    {
+        wheel_starting = true;
+        wheel_start_tick = HAL_GetTick();
+    }
+}
+
+/* 출발 시간 내에 양쪽 엔코더가 모두 감지되지 않았는지 반환한다. */
+bool wheel_has_startup_fault(void)
+{
+    return wheel_startup_fault;
 }
 
 /* 선택한 바퀴에 설정된 목표 RPM을 반환한다. */

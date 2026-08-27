@@ -18,8 +18,8 @@
 
 /* 듀티를 RPM 으로 바꾸기 위한 실측 기준값
  * ★ 개루프 주행으로 측정한 값에 맞춰 반드시 수정할 것 ★ */
-#define DRIVE_RPM_AT_MIN_DUTY   150.0f   /* 80% 에서 나온 RPM */
-#define DRIVE_RPM_AT_MAX_DUTY   270.0f   /* 100% 에서 나온 RPM */
+#define DRIVE_RPM_AT_MIN_DUTY    90.0f   /* 80% 에서 나온 RPM */
+#define DRIVE_RPM_AT_MAX_DUTY   150.0f   /* 100% 에서 나온 RPM */
 
 /* 회전 명령 한 번에 돌릴 각도 [도] */
 #define DRIVE_TURN_STEP_DEG     90.0f
@@ -28,6 +28,9 @@
 #define DRIVE_WHEEL_PERIOD_MS   100
 
 static uint32_t drive_wheel_accum = 0;
+
+/* false인 동안에는 제어기 상태와 관계없이 모터 출력을 강제로 0으로 유지한다. */
+static bool drive_active = false;
 
 /* 현재 설정된 기본 주행 속도 [PWM %] */
 static uint8_t drive_speed = DRIVE_SPEED_NORMAL;
@@ -84,6 +87,8 @@ void drive_init(void)
     wheel_init();
     heading_init();
 
+    drive_wheel_accum = 0;
+    drive_active = false;
     drive_speed = DRIVE_SPEED_NORMAL;
 
     drive_stop();
@@ -94,6 +99,13 @@ void drive_init(void)
 void drive_update(uint32_t elapsed_time_ms)
 {
     heading_update(elapsed_time_ms);
+
+    if (drive_active == false)
+    {
+        wheel_stop();
+        drive_wheel_accum = 0;
+        return;
+    }
 
     drive_wheel_accum += elapsed_time_ms;
 
@@ -140,6 +152,7 @@ void drive_set_speed(uint8_t speed)
 void drive_forward(uint8_t speed)
 {
     drive_speed = speed;
+    drive_active = true;
 
     heading_set_enabled(true);
     heading_set_base_rpm(drive_duty_to_rpm(speed));
@@ -149,6 +162,7 @@ void drive_forward(uint8_t speed)
 void drive_backward(uint8_t speed)
 {
     drive_speed = speed;
+    drive_active = true;
 
     heading_set_enabled(true);
     heading_set_base_rpm(-drive_duty_to_rpm(speed));
@@ -159,6 +173,7 @@ void drive_backward(uint8_t speed)
 void drive_turn_left(uint8_t speed)
 {
     drive_speed = speed;
+    drive_active = true;
 
     heading_set_enabled(true);
     heading_set_base_rpm(0.0f);
@@ -169,6 +184,7 @@ void drive_turn_left(uint8_t speed)
 void drive_turn_right(uint8_t speed)
 {
     drive_speed = speed;
+    drive_active = true;
 
     heading_set_enabled(true);
     heading_set_base_rpm(0.0f);
@@ -178,6 +194,8 @@ void drive_turn_right(uint8_t speed)
 /* 좌우 바퀴를 모두 멈춘다. 기준 방향은 유지한다. */
 void drive_stop(void)
 {
+    drive_active = false;
+    heading_set_enabled(false);
     heading_stop();
 }
 

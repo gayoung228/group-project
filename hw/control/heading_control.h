@@ -59,6 +59,9 @@ void heading_set_enabled(bool enabled);
 // 방향 제어가 켜져 있는지 반환한다.
 bool heading_is_enabled(void);
 
+// 직진 중 Yaw 오차가 안전 한계를 넘었는지 반환
+bool heading_has_runaway_fault(void);
+
 // 현재 방향이 기준 방향에 충분히 가까운지 반환한다.
 bool heading_is_aligned(void);
 
