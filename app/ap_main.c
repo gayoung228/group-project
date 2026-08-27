@@ -15,14 +15,16 @@
  * 터미널 설정 : 115200 8N1
  * ------------------------------------------------------------------ */
 
-/* 제어 주기 [ms] : 엔코더 RPM 이 30 단위로 끊기므로 너무 짧게 하지 않는다 */
-#define CONTROL_PERIOD_MS       30
+/* 제어 주기 [ms]
+ * 20슬롯 엔코더를 100ms마다 읽으면 펄스 1개가 30RPM이다.
+ * 기존 30ms에서는 펄스 1개가 100RPM이어서 PID 입력이 너무 크게 튀었다. */
+#define CONTROL_PERIOD_MS       100
 
 /* 화면 출력 주기 [ms] */
 #define PRINT_PERIOD_MS         200
 
 /* 목표 주행 거리 [mm] */
-#define TARGET_DISTANCE_MM      2000
+#define TARGET_DISTANCE_MM      8000
 
 /* ★ encoder.c 의 ENCODER_SLOTS_PER_REV 과 반드시 같은 값이어야 한다 ★ */
 #define SLOTS_PER_REV           20
@@ -36,7 +38,7 @@
  * 개루프는 PWM 듀티를, 폐루프는 목표 RPM 을 쓴다.
  * 개루프로 먼저 달려보고 실제로 나온 RPM 을 아래 목표값에 맞추면
  * 두 방식의 속도가 같아져 비교가 정확해진다. */
-#define LOW_SPEED_DUTY          70
+#define LOW_SPEED_DUTY          90
 #define LOW_SPEED_RPM           90.0f
 #define HIGH_SPEED_DUTY         100
 #define HIGH_SPEED_RPM          180.0f
@@ -52,7 +54,7 @@ typedef enum
 extern UART_HandleTypeDef huart2;
 
 static run_state_t run_state  = RUN_IDLE;
-static bool        use_pid    = false;   /* false: 개루프, true: 폐루프 */
+static bool        use_pid    = true;    /* false: 개루프, true: 폐루프 */
 static bool        use_high   = false;   /* false: 저속,   true: 고속   */
 static uint32_t    start_tick = 0;
 
@@ -248,22 +250,38 @@ static void handle_command(uint8_t ch)
         case 'o':
         case 'O':
             use_pid = false;
+            if (run_state == RUN_ACTIVE)
+            {
+                apply_drive();
+            }
             print_mode();
             break;
 
         case 'c':
         case 'C':
             use_pid = true;
+            if (run_state == RUN_ACTIVE)
+            {
+                apply_drive();
+            }
             print_mode();
             break;
 
         case '1':
             use_high = false;
+            if (run_state == RUN_ACTIVE)
+            {
+                apply_drive();
+            }
             print_mode();
             break;
 
         case '2':
             use_high = true;
+            if (run_state == RUN_ACTIVE)
+            {
+                apply_drive();
+            }
             print_mode();
             break;
 
@@ -296,7 +314,7 @@ void ap_init(void)
 {
     wheel_init();
 
-    /* 초기 상태는 개루프이므로 PID 가 모터를 건드리지 않게 꺼 둔다 */
+    /* 시작 명령이 오기 전에는 PID와 모터를 모두 꺼 둔다. */
     wheel_set_enabled(false);
     motor_stop_all();
 }
