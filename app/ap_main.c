@@ -1,6 +1,7 @@
 #include "main.h"
 #include "ap_main.h"
 #include "drive.h"
+#include "mpu6050.h"
 #include "stm32f4xx_hal.h"
 
 /* 기본 주행 속도 [%] */
@@ -18,13 +19,12 @@
 /* 애플리케이션에서 사용하는 모듈들을 초기화한다. */
 void ap_init(void) {
     drive_init();
+    mpu6050_start();
 }
 
 /* 애플리케이션 메인 루프.
  * 전진 / 후진 / 좌회전 / 우회전 / 정지와 PWM 속도 변화를 순서대로 확인한다. */
 void ap_main(void) {
-    HAL_Delay(5000);
-
     while (1)
     {
         /* 전진 */
