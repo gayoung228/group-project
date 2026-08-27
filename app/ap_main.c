@@ -1,47 +1,37 @@
 #include "main.h"
 #include "ap_main.h"
+#include "drive.h"
+#include "heading_control.h"
 #include "wheel.h"
-#include "motor.h"
 #include "encoder.h"
 #include <stdio.h>
 
 /* ------------------------------------------------------------------
- * ap_main.c - 직진 주행 시험
+ * ap_main.c - 자이로 방향 유지 시험
  *
- * UART 로 명령을 받아 개루프 주행과 PID 폐루프 주행을 번갈아 시험한다.
- * 평탄한 바닥에서 2m 를 달린 뒤 좌우 엔코더 카운트 차이를 비교하여
- * PID 제어의 효과를 확인하는 것이 목적이다.
+ * UART 명령으로 방향 제어를 켜고 끄면서
+ * 주행 중 방향이 틀어졌을 때 스스로 복귀하는지 확인한다.
  *
  * 터미널 설정 : 115200 8N1
  * ------------------------------------------------------------------ */
 
 /* 제어 주기 [ms]
- * 20슬롯 엔코더를 100ms마다 읽으면 펄스 1개가 30RPM이다.
- * 기존 30ms에서는 펄스 1개가 100RPM이어서 PID 입력이 너무 크게 튀었다. */
-#define CONTROL_PERIOD_MS       100
+ * 자이로 적분은 주기가 짧고 일정해야 정확하다. */
+#define CONTROL_PERIOD_MS       20
 
 /* 화면 출력 주기 [ms] */
 #define PRINT_PERIOD_MS         200
 
-/* 목표 주행 거리 [mm] */
+/* 목표 주행 거리 [mm] : 0 이면 거리 제한 없이 계속 달린다 */
 #define TARGET_DISTANCE_MM      8000
 
-/* ★ encoder.c 의 ENCODER_SLOTS_PER_REV 과 반드시 같은 값이어야 한다 ★ */
+/* ★ encoder.c 의 ENCODER_SLOTS_PER_REV 과 같은 값이어야 한다 ★ */
 #define SLOTS_PER_REV           20
 
 /* 바퀴 지름 [mm] : 실물에 맞게 수정할 것 */
 #define WHEEL_DIAMETER_MM       65.0f
 
 #define PI_VALUE                3.141592f
-
-/* 저속 / 고속 설정
- * 개루프는 PWM 듀티를, 폐루프는 목표 RPM 을 쓴다.
- * 개루프로 먼저 달려보고 실제로 나온 RPM 을 아래 목표값에 맞추면
- * 두 방식의 속도가 같아져 비교가 정확해진다. */
-#define LOW_SPEED_DUTY          90
-#define LOW_SPEED_RPM           90.0f
-#define HIGH_SPEED_DUTY         100
-#define HIGH_SPEED_RPM          180.0f
 
 
 /* 주행 상태 */
@@ -54,8 +44,7 @@ typedef enum
 extern UART_HandleTypeDef huart2;
 
 static run_state_t run_state  = RUN_IDLE;
-static bool        use_pid    = true;    /* false: 개루프, true: 폐루프 */
-static bool        use_high   = false;   /* false: 저속,   true: 고속   */
+static uint8_t     run_speed  = DRIVE_SPEED_NORMAL;
 static uint32_t    start_tick = 0;
 
 
@@ -90,14 +79,18 @@ static float get_distance_mm(void)
 static void print_help(void)
 {
     printf("\r\n=========================================\r\n");
-    printf(" Straight Drive Test  (target %d mm)\r\n", TARGET_DISTANCE_MM);
+    printf(" Heading Hold Test  (target %d mm)\r\n", TARGET_DISTANCE_MM);
     printf("=========================================\r\n");
-    printf("  s : start\r\n");
+    printf("  s : start forward\r\n");
     printf("  x : stop\r\n");
-    printf("  o : open loop  (PID off)\r\n");
-    printf("  c : closed loop (PID on)\r\n");
-    printf("  1 : low  speed\r\n");
-    printf("  2 : high speed\r\n");
+    printf("  g : heading control ON\r\n");
+    printf("  n : heading control OFF\r\n");
+    printf("  z : reset heading reference\r\n");
+    printf("  l : rotate left  90 deg\r\n");
+    printf("  r : rotate right 90 deg\r\n");
+    printf("  1 : slow   (%d %%)\r\n", DRIVE_SPEED_SLOW);
+    printf("  2 : normal (%d %%)\r\n", DRIVE_SPEED_NORMAL);
+    printf("  3 : fast   (%d %%)\r\n", DRIVE_SPEED_FAST);
     printf("  h : help\r\n");
     printf("-----------------------------------------\r\n");
 }
@@ -105,36 +98,25 @@ static void print_help(void)
 /* 현재 선택된 주행 조건을 한 줄로 안내한다. */
 static void print_mode(void)
 {
-    if (use_pid)
-    {
-        printf("[mode] PID ON  / %s (%d rpm)\r\n",
-               use_high ? "HIGH" : "LOW",
-               (int)(use_high ? HIGH_SPEED_RPM : LOW_SPEED_RPM));
-    }
-    else
-    {
-        printf("[mode] PID OFF / %s (%d %%)\r\n",
-               use_high ? "HIGH" : "LOW",
-               use_high ? HIGH_SPEED_DUTY : LOW_SPEED_DUTY);
-    }
+    printf("[mode] heading %s / speed %d %%\r\n",
+           heading_is_enabled() ? "ON " : "OFF",
+           run_speed);
 }
 
 /* 주행 중 상태를 한 줄로 출력한다.
- * 좌우 카운트 차이가 직진성을 판단하는 핵심 지표이다. */
+ * yaw 오차와 보정량을 함께 봐야 제어가 동작하는지 알 수 있다. */
 static void print_status(void)
 {
-    int32_t left_count  = encoder_get_count(ENCODER_LEFT);
-    int32_t right_count = encoder_get_count(ENCODER_RIGHT);
-
-    printf("%5dmm | L cnt:%5ld rpm:%4d out:%4d | R cnt:%5ld rpm:%4d out:%4d | diff:%4ld\r\n",
+    printf("%5dmm | yaw tgt:%5d cur:%5d err:%5d corr:%5d | rpm L:%4d R:%4d | out L:%4d R:%4d\r\n",
            (int)get_distance_mm(),
-           left_count,
+           (int)heading_get_target(),
+           (int)heading_get_current(),
+           (int)heading_get_error(),
+           (int)heading_get_correction(),
            (int)wheel_get_rpm(WHEEL_LEFT),
-           (int)motor_get_speed(MOTOR_LEFT),
-           right_count,
            (int)wheel_get_rpm(WHEEL_RIGHT),
-           (int)motor_get_speed(MOTOR_RIGHT),
-           left_count - right_count);
+           (int)drive_get_left_speed(),
+           (int)drive_get_right_speed());
 }
 
 /* 주행이 끝난 뒤 결과를 정리해서 출력한다. */
@@ -143,77 +125,44 @@ static void print_result(void)
     int32_t left_count  = encoder_get_count(ENCODER_LEFT);
     int32_t right_count = encoder_get_count(ENCODER_RIGHT);
     int32_t diff        = left_count - right_count;
-    int32_t total       = left_count + right_count;
-    int     percent     = 0;
 
     if (diff < 0)
     {
         diff = -diff;
     }
 
-    /* 좌우 차이가 평균 대비 몇 퍼센트인지 계산한다 */
-    if (total > 0)
-    {
-        percent = (int)((diff * 200) / total);
-    }
-
     printf("\r\n----------- RESULT -----------\r\n");
     print_mode();
-    printf(" distance : %d mm\r\n", (int)get_distance_mm());
-    printf(" time     : %d ms\r\n", (int)(HAL_GetTick() - start_tick));
-    printf(" L count  : %ld\r\n", left_count);
-    printf(" R count  : %ld\r\n", right_count);
-    printf(" diff     : %ld (%d %%)\r\n", diff, percent);
+    printf(" distance  : %d mm\r\n", (int)get_distance_mm());
+    printf(" time      : %d ms\r\n", (int)(HAL_GetTick() - start_tick));
+    printf(" yaw final : %d deg\r\n", (int)heading_get_current());
+    printf(" L count   : %ld\r\n", left_count);
+    printf(" R count   : %ld\r\n", right_count);
+    printf(" diff      : %ld\r\n", diff);
     printf("------------------------------\r\n");
     printf("Measure the sideways offset at the finish line.\r\n\r\n");
 }
 
-/* 선택한 방식으로 모터에 출력을 넣는 내부 함수 */
-static void apply_drive(void)
-{
-    if (use_pid)
-    {
-        /* 폐루프 : 목표 RPM 만 주고 출력은 PID 가 결정한다 */
-        float target = use_high ? HIGH_SPEED_RPM : LOW_SPEED_RPM;
-
-        wheel_set_enabled(true);
-        wheel_set_target_rpm_both(target, target);
-    }
-    else
-    {
-        /* 개루프 : 좌우에 똑같은 듀티를 주고 그대로 둔다.
-         * wheel 제어를 꺼야 PID 가 이 출력을 덮어쓰지 않는다 */
-        int16_t duty = use_high ? HIGH_SPEED_DUTY : LOW_SPEED_DUTY;
-
-        wheel_set_enabled(false);
-        motor_set_output(MOTOR_LEFT,  duty);
-        motor_set_output(MOTOR_RIGHT, duty);
-    }
-}
-
-/* 주행을 시작한다. 카운트를 초기화하고 모터를 돌린다. */
+/* 주행을 시작한다. */
 static void start_run(void)
 {
-    /* 제어를 먼저 끄고 초기화해야 이전 목표값이 남지 않는다 */
-    wheel_set_enabled(false);
+    /* 이전 주행의 PID 상태와 출발 오류를 모두 초기화한다. */
     wheel_reset();
-    encoder_reset();
+    heading_reset();
 
     start_tick = HAL_GetTick();
     run_state  = RUN_ACTIVE;
 
+    drive_forward(run_speed);
+
     printf("\r\n>>> START\r\n");
     print_mode();
-
-    apply_drive();
 }
 
 /* 주행을 멈추고 결과를 출력한다. */
 static void finish_run(void)
 {
-    /* PID 가 다시 출력을 내지 않도록 먼저 끈다 */
-    wheel_set_enabled(false);
-    motor_stop_all();
+    drive_stop();
 
     run_state = RUN_IDLE;
 
@@ -242,46 +191,55 @@ static void handle_command(uint8_t ch)
             }
             else
             {
-                wheel_set_enabled(false);
-                motor_stop_all();
+                drive_stop();
             }
             break;
 
-        case 'o':
-        case 'O':
-            use_pid = false;
-            if (run_state == RUN_ACTIVE)
-            {
-                apply_drive();
-            }
+        case 'g':
+        case 'G':
+            heading_set_enabled(true);
             print_mode();
             break;
 
-        case 'c':
-        case 'C':
-            use_pid = true;
-            if (run_state == RUN_ACTIVE)
-            {
-                apply_drive();
-            }
+        case 'n':
+        case 'N':
+            heading_set_enabled(false);
             print_mode();
+            break;
+
+        case 'z':
+        case 'Z':
+            heading_reset();
+            printf("[heading] reference reset\r\n");
+            break;
+
+        case 'l':
+        case 'L':
+            printf("[heading] rotate left 90\r\n");
+            drive_turn_left(run_speed);
+            break;
+
+        case 'r':
+        case 'R':
+            printf("[heading] rotate right 90\r\n");
+            drive_turn_right(run_speed);
             break;
 
         case '1':
-            use_high = false;
-            if (run_state == RUN_ACTIVE)
-            {
-                apply_drive();
-            }
+            run_speed = DRIVE_SPEED_SLOW;
+            drive_set_speed(run_speed);
             print_mode();
             break;
 
         case '2':
-            use_high = true;
-            if (run_state == RUN_ACTIVE)
-            {
-                apply_drive();
-            }
+            run_speed = DRIVE_SPEED_NORMAL;
+            drive_set_speed(run_speed);
+            print_mode();
+            break;
+
+        case '3':
+            run_speed = DRIVE_SPEED_FAST;
+            drive_set_speed(run_speed);
             print_mode();
             break;
 
@@ -309,18 +267,14 @@ static void poll_uart(void)
 }
 
 
-/* 애플리케이션에서 사용하는 모듈들을 초기화한다. */
+/* 애플리케이션에서 사용하는 모듈들을 초기화한다.
+ * 자이로 영점 보정 중에는 차체를 절대 움직이면 안 된다. */
 void ap_init(void)
 {
-    wheel_init();
-
-    /* 시작 명령이 오기 전에는 PID와 모터를 모두 꺼 둔다. */
-    wheel_set_enabled(false);
-    motor_stop_all();
+    drive_init();
 }
 
-/* 직진 주행 시험용 메인 루프.
- * 명령을 받아 주행을 제어하고 일정 주기로 상태를 출력한다. */
+/* 자이로 방향 유지 시험용 메인 루프. */
 void ap_main(void)
 {
     uint32_t control_tick = HAL_GetTick();
@@ -333,16 +287,28 @@ void ap_main(void)
     {
         poll_uart();
 
-        /* 일정 주기로 엔코더를 갱신한다.
-         * 개루프에서도 측정은 계속해야 비교가 가능하다 */
+        /* 일정 주기로 자이로와 바퀴 제어를 갱신한다 */
         if ((HAL_GetTick() - control_tick) >= CONTROL_PERIOD_MS)
         {
             control_tick += CONTROL_PERIOD_MS;
 
-            wheel_update(CONTROL_PERIOD_MS);
+            drive_update(CONTROL_PERIOD_MS);
+
+            if ((run_state == RUN_ACTIVE) && wheel_has_startup_fault())
+            {
+                printf("\r\n>>> WHEEL START FAILED\r\n");
+                finish_run();
+            }
+
+            if ((run_state == RUN_ACTIVE) && heading_has_runaway_fault())
+            {
+                printf("\r\n>>> HEADING ERROR: YAW OVER 45 DEG\r\n");
+                finish_run();
+            }
 
             /* 목표 거리에 도달하면 스스로 멈춘다 */
             if ((run_state == RUN_ACTIVE) &&
+                (TARGET_DISTANCE_MM > 0) &&
                 (get_distance_mm() >= (float)TARGET_DISTANCE_MM))
             {
                 printf("\r\n>>> TARGET REACHED\r\n");
@@ -350,9 +316,8 @@ void ap_main(void)
             }
         }
 
-        /* 주행 중에만 상태를 출력한다 */
-        if ((run_state == RUN_ACTIVE) &&
-            ((HAL_GetTick() - print_tick) >= PRINT_PERIOD_MS))
+        /* 일정 주기로 상태를 출력한다 */
+        if ((HAL_GetTick() - print_tick) >= PRINT_PERIOD_MS)
         {
             print_tick += PRINT_PERIOD_MS;
             print_status();

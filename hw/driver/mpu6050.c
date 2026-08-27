@@ -60,10 +60,6 @@ static float mpu6050_roll_deg  = 0.0f;
 static float mpu6050_pitch_deg = 0.0f;
 static float mpu6050_yaw_deg   = 0.0f;
 
-/* orientation 적분에 사용하는 이전 호출 시각(ms)과 시작 여부 */
-static uint32_t mpu6050_orientation_last_tick = 0;
-static bool     mpu6050_orientation_started   = false;
-
 
 /* 레지스터를 읽는 내부 함수 */
 static bool mpu6050_read_regs(uint8_t reg, uint8_t *buf, uint16_t len)
@@ -107,7 +103,7 @@ bool mpu6050_init(void)
         return false;
     }
 
-    if (!mpu6050_write_reg(MPU6050_REG_CONFIG, 0x00))
+    if (!mpu6050_write_reg(MPU6050_REG_CONFIG, 0x03))
     {
         return false;
     }
@@ -246,35 +242,22 @@ void mpu6050_orientation_reset(void)
     mpu6050_roll_deg  = 0.0f;
     mpu6050_pitch_deg = 0.0f;
     mpu6050_yaw_deg   = 0.0f;
-
-    mpu6050_orientation_last_tick = HAL_GetTick();
-    mpu6050_orientation_started   = true;
 }
 
-/* 최근 mpu6050_update() 결과(보정된 gyro dps)를 실제 dt로 적분하여 Roll/Pitch/Yaw를 누적.
- * I2C를 다시 읽지 않으므로, 최신 값을 쌓으려면 호출자가 mpu6050_update()를 먼저(또는 같은 주기로) 불러야 한다. */
-bool mpu6050_orientation_update(void)
+/* 최근 mpu6050_update() 결과(보정된 gyro dps)를 호출자가 준 dt로 적분하여
+ * Roll/Pitch/Yaw를 누적한다.
+ * I2C를 다시 읽지 않으므로, 호출자가 mpu6050_update()를 먼저 불러야 한다.
+ * 적분 시간을 호출자가 정하므로 제어 주기와 항상 일치한다. */
+bool mpu6050_orientation_update(uint32_t elapsed_time_ms)
 {
-    uint32_t now_tick;
     float dt_s;
 
-    if (!mpu6050_ready)
+    if (!mpu6050_ready || elapsed_time_ms == 0)
     {
         return false;
     }
 
-    now_tick = HAL_GetTick();
-
-    if (!mpu6050_orientation_started)
-    {
-        /* orientation_reset()을 먼저 부르지 않았다면 이번 호출 시각을 기준으로 삼는다 */
-        mpu6050_orientation_last_tick = now_tick;
-        mpu6050_orientation_started   = true;
-        return true;
-    }
-
-    dt_s = (now_tick - mpu6050_orientation_last_tick) / 1000.0f;
-    mpu6050_orientation_last_tick = now_tick;
+    dt_s = elapsed_time_ms / 1000.0f;
 
     mpu6050_roll_deg  += mpu6050_last_data.gyro_x_dps * dt_s;
     mpu6050_pitch_deg += mpu6050_last_data.gyro_y_dps * dt_s;

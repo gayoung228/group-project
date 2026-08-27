@@ -49,6 +49,9 @@ bool wheel_is_enabled(void);
 // 선택한 바퀴가 목표 RPM에 도달했는지 반환한다.
 bool wheel_is_reached(wheel_t wheel);
 
+// 출발 시간 내에 양쪽 엔코더가 모두 감지되지 않았는지 반환
+bool wheel_has_startup_fault(void);
+
 // 좌우 바퀴를 모두 정지시키고 PID 누적 상태를 초기화한다.
 void wheel_stop(void);
 
