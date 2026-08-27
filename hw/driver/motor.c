@@ -1,153 +1,258 @@
-#include "motor.h"
 #include "main.h"
+#include "motor.h"
 
-extern TIM_HandleTypeDef htim2;
-extern TIM_HandleTypeDef htim3;
+/* ------------------------------------------------------------------
+ * 하드웨어 배선 (Pin Map 문서 기준)
+ *
+ *   모터 L PWM  : PB10  TIM2_CH3   -> TB6612FNG PWMA
+ *   모터 L IN1  : PB5   GPIO Out   -> TB6612FNG AIN1
+ *   모터 L IN2  : PB4   GPIO Out   -> TB6612FNG AIN2
+ *   모터 R PWM  : PC7   TIM3_CH2   -> TB6612FNG PWMB
+ *   모터 R IN1  : PA8   GPIO Out   -> TB6612FNG BIN1
+ *   모터 R IN2  : PA9   GPIO Out   -> TB6612FNG BIN2
+ *   드라이버 STBY: PB3  GPIO Out   -> TB6612FNG STBY
+ *
+ * ------------------------------------------------------------------ */
 
-// 선택한 모터의 PWM 타이머를 반환한다.
-static TIM_HandleTypeDef *motor_get_timer(motor_t motor)
+#define MOTOR_L_IN1_PORT    GPIOB
+#define MOTOR_L_IN1_PIN     GPIO_PIN_5
+#define MOTOR_L_IN2_PORT    GPIOB
+#define MOTOR_L_IN2_PIN     GPIO_PIN_4
+
+#define MOTOR_R_IN1_PORT    GPIOA
+#define MOTOR_R_IN1_PIN     GPIO_PIN_8
+#define MOTOR_R_IN2_PORT    GPIOA
+#define MOTOR_R_IN2_PIN     GPIO_PIN_9
+
+#define MOTOR_STBY_PORT     GPIOB
+#define MOTOR_STBY_PIN      GPIO_PIN_3
+
+/* 좌우 모터는 서로 마주 보게 장착되므로 한쪽은 배선상 방향이 반대다.
+ * 실제로 조립한 뒤 전진 명령에서 한쪽만 반대로 돌면 이 값을 뒤집는다. */
+#define MOTOR_L_INVERT      0
+#define MOTOR_R_INVERT      0
+
+/* 속도 지령의 최대값 [%] */
+#define MOTOR_SPEED_MAX     100
+
+/* 모터 개수 */
+#define MOTOR_COUNT         2
+
+
+/* CubeMX 가 생성한 타이머 핸들 */
+extern TIM_HandleTypeDef htim2;   /* 좌측 모터 PWM */
+extern TIM_HandleTypeDef htim3;   /* 우측 모터 PWM */
+
+
+/* 모터 한 개의 하드웨어 정보를 묶어 두는 구조체 */
+typedef struct
 {
-    if (motor == MOTOR_LEFT)
+    GPIO_TypeDef      *in1_port;
+    uint16_t           in1_pin;
+    GPIO_TypeDef      *in2_port;
+    uint16_t           in2_pin;
+    TIM_HandleTypeDef *pwm_tim;
+    uint32_t           pwm_channel;
+    uint8_t            invert;
+} motor_hw_t;
+
+
+/* 좌우 모터의 배선 정보 테이블 */
+static const motor_hw_t motor_hw[MOTOR_COUNT] =
+{
+    /* MOTOR_LEFT */
     {
-        return &htim2;
+        MOTOR_L_IN1_PORT, MOTOR_L_IN1_PIN,
+        MOTOR_L_IN2_PORT, MOTOR_L_IN2_PIN,
+        &htim2, TIM_CHANNEL_3,
+        MOTOR_L_INVERT
+    },
+    /* MOTOR_RIGHT */
+    {
+        MOTOR_R_IN1_PORT, MOTOR_R_IN1_PIN,
+        MOTOR_R_IN2_PORT, MOTOR_R_IN2_PIN,
+        &htim3, TIM_CHANNEL_2,
+        MOTOR_R_INVERT
+    }
+};
+
+/* 현재 설정된 상태를 기억해 두는 변수 (get 함수에서 사용) */
+static motor_direction_t motor_direction[MOTOR_COUNT];
+static uint8_t           motor_speed[MOTOR_COUNT];
+
+
+/* 0~100% 속도값을 타이머 비교값으로 바꿔 PWM 듀티에 적용하는 내부 함수 */
+static void motor_write_pwm(motor_t motor, uint8_t speed)
+{
+    uint32_t period;
+    uint32_t compare;
+
+    if (speed > MOTOR_SPEED_MAX)
+    {
+        speed = MOTOR_SPEED_MAX;
     }
 
-    if (motor == MOTOR_RIGHT)
+    /* ARR 값을 읽어서 계산하므로 PWM 주파수를 바꿔도 코드 수정이 필요 없다 */
+    period  = __HAL_TIM_GET_AUTORELOAD(motor_hw[motor].pwm_tim) + 1;
+    compare = (period * speed) / MOTOR_SPEED_MAX;
+
+    if (compare > 0)
     {
-        return &htim3;
+        compare = compare - 1;
     }
 
-    return NULL;
+    __HAL_TIM_SET_COMPARE(motor_hw[motor].pwm_tim,
+                          motor_hw[motor].pwm_channel,
+                          compare);
 }
 
-// 선택한 모터의 PWM 채널을 반환한다.
-static uint32_t motor_get_channel(motor_t motor)
+/* IN1 / IN2 핀을 실제로 출력하는 내부 함수
+ * invert 가 1 인 모터는 여기서 두 핀의 역할을 서로 바꾼다. */
+static void motor_write_direction(motor_t motor, GPIO_PinState in1, GPIO_PinState in2)
 {
-    if (motor == MOTOR_LEFT)
+    GPIO_PinState out1 = in1;
+    GPIO_PinState out2 = in2;
+
+    if (motor_hw[motor].invert != 0)
     {
-        return TIM_CHANNEL_3;
+        out1 = in2;
+        out2 = in1;
     }
 
-    if (motor == MOTOR_RIGHT)
-    {
-        return TIM_CHANNEL_2;
-    }
-
-    return 0;
+    HAL_GPIO_WritePin(motor_hw[motor].in1_port, motor_hw[motor].in1_pin, out1);
+    HAL_GPIO_WritePin(motor_hw[motor].in2_port, motor_hw[motor].in2_pin, out2);
 }
 
-// 좌우 모터의 방향 핀을 정지 상태로 만들고 PWM을 시작한다.
+
+/* 모터 방향 핀을 정지 상태로 만들고 좌우 PWM을 시작한다. */
 void motor_init(void)
 {
-    HAL_GPIO_WritePin(MOTOR_STBY_GPIO_Port, MOTOR_STBY_Pin, GPIO_PIN_RESET);
+    motor_t motor;
 
-    motor_set_direction(MOTOR_LEFT, MOTOR_STOP);
-    motor_set_direction(MOTOR_RIGHT, MOTOR_STOP);
+    /* 초기화가 끝날 때까지 드라이버 출력을 막아 둔다 */
+    HAL_GPIO_WritePin(MOTOR_STBY_PORT, MOTOR_STBY_PIN, GPIO_PIN_RESET);
 
-    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);
-    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 0);
-
-    if (HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3) != HAL_OK)
+    for (motor = MOTOR_LEFT; motor < MOTOR_COUNT; motor++)
     {
-        Error_Handler();
+        motor_direction[motor] = MOTOR_STOP;
+        motor_speed[motor]     = 0;
+
+        motor_write_direction(motor, GPIO_PIN_RESET, GPIO_PIN_RESET);
+
+        HAL_TIM_PWM_Start(motor_hw[motor].pwm_tim, motor_hw[motor].pwm_channel);
+        motor_write_pwm(motor, 0);
     }
 
-    if (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2) != HAL_OK)
-    {
-        Error_Handler();
-    }
-
-    HAL_GPIO_WritePin(MOTOR_STBY_GPIO_Port, MOTOR_STBY_Pin, GPIO_PIN_SET);
+    /* 모든 출력이 정지 상태임을 확인한 뒤 드라이버를 활성화한다 */
+    HAL_GPIO_WritePin(MOTOR_STBY_PORT, MOTOR_STBY_PIN, GPIO_PIN_SET);
 }
 
-// 선택한 모터의 회전 방향을 설정한다.
+/* 선택한 모터의 회전 방향을 설정한다. */
 void motor_set_direction(motor_t motor, motor_direction_t direction)
 {
-    GPIO_TypeDef *in1_port;
-    GPIO_TypeDef *in2_port;
-    uint16_t in1_pin;
-    uint16_t in2_pin;
-
-    if (motor == MOTOR_LEFT)
-    {
-        in1_port = MOTOR_L_IN1_GPIO_Port;
-        in1_pin = MOTOR_L_IN1_Pin;
-        in2_port = MOTOR_L_IN2_GPIO_Port;
-        in2_pin = MOTOR_L_IN2_Pin;
-    }
-    else if (motor == MOTOR_RIGHT)
-    {
-        in1_port = MOTOR_R_IN1_GPIO_Port;
-        in1_pin = MOTOR_R_IN1_Pin;
-        in2_port = MOTOR_R_IN2_GPIO_Port;
-        in2_pin = MOTOR_R_IN2_Pin;
-    }
-    else
+    if (motor >= MOTOR_COUNT)
     {
         return;
     }
+
+    motor_direction[motor] = direction;
 
     if (direction == MOTOR_FORWARD)
     {
-        HAL_GPIO_WritePin(in1_port, in1_pin, GPIO_PIN_SET);
-        HAL_GPIO_WritePin(in2_port, in2_pin, GPIO_PIN_RESET);
+        motor_write_direction(motor, GPIO_PIN_SET, GPIO_PIN_RESET);
     }
     else if (direction == MOTOR_REVERSE)
     {
-        HAL_GPIO_WritePin(in1_port, in1_pin, GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(in2_port, in2_pin, GPIO_PIN_SET);
+        motor_write_direction(motor, GPIO_PIN_RESET, GPIO_PIN_SET);
     }
     else
     {
-        HAL_GPIO_WritePin(in1_port, in1_pin, GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(in2_port, in2_pin, GPIO_PIN_RESET);
+        /* IN1 = IN2 = LOW : 출력을 끊어 관성으로 굴러가게 둔다 */
+        motor_write_direction(motor, GPIO_PIN_RESET, GPIO_PIN_RESET);
     }
 }
 
-// 선택한 모터의 PWM 듀티를 0~100% 범위로 설정한다.
+/* 선택한 모터의 속도를 0~100% 범위로 설정한다. */
 void motor_set_speed(motor_t motor, uint8_t speed)
 {
-    TIM_HandleTypeDef *timer = motor_get_timer(motor);
-    uint32_t channel = motor_get_channel(motor);
-    uint32_t period;
-    uint32_t pulse;
-
-    if ((timer == NULL) || (channel == 0))
+    if (motor >= MOTOR_COUNT)
     {
         return;
     }
 
-    if (speed > 100)
+    if (speed > MOTOR_SPEED_MAX)
     {
-        speed = 100;
+        speed = MOTOR_SPEED_MAX;
     }
 
-    period = __HAL_TIM_GET_AUTORELOAD(timer) + 1U;
-    pulse = (period * speed) / 100U;
-
-    __HAL_TIM_SET_COMPARE(timer, channel, pulse);
+    motor_speed[motor] = speed;
+    motor_write_pwm(motor, speed);
 }
 
-// 선택한 모터의 방향과 속도를 함께 설정한다.
+/* 선택한 모터의 방향과 속도를 함께 설정한다. */
 void motor_control(motor_t motor, motor_direction_t direction, uint8_t speed)
 {
-    motor_set_speed(motor, 0);
-
-    if ((direction == MOTOR_STOP) || (speed == 0))
-    {
-        motor_set_direction(motor, MOTOR_STOP);
-        return;
-    }
-
     motor_set_direction(motor, direction);
     motor_set_speed(motor, speed);
 }
 
-// 좌우 모터의 PWM과 방향을 모두 정지 상태로 만든다.
+/* 좌우 모터를 모두 정지한다. */
 void motor_stop_all(void)
 {
-    motor_set_speed(MOTOR_LEFT, 0);
-    motor_set_speed(MOTOR_RIGHT, 0);
-    motor_set_direction(MOTOR_LEFT, MOTOR_STOP);
-    motor_set_direction(MOTOR_RIGHT, MOTOR_STOP);
+    motor_stop(MOTOR_LEFT);
+    motor_stop(MOTOR_RIGHT);
+}
+
+/* 부호를 포함한 -100~100 값으로 모터 방향과 속도를 함께 설정 */
+void motor_set_output(motor_t motor, int16_t output)
+{
+    if (output > MOTOR_SPEED_MAX)
+    {
+        output = MOTOR_SPEED_MAX;
+    }
+    if (output < -MOTOR_SPEED_MAX)
+    {
+        output = -MOTOR_SPEED_MAX;
+    }
+
+    if (output > 0)
+    {
+        motor_control(motor, MOTOR_FORWARD, (uint8_t)output);
+    }
+    else if (output < 0)
+    {
+        motor_control(motor, MOTOR_REVERSE, (uint8_t)(-output));
+    }
+    else
+    {
+        motor_stop(motor);
+    }
+}
+
+/* 선택한 모터 하나를 정지 */
+void motor_stop(motor_t motor)
+{
+    motor_control(motor, MOTOR_STOP, 0);
+}
+
+/* 선택한 모터에 설정된 속도를 반환 */
+uint8_t motor_get_speed(motor_t motor)
+{
+    if (motor >= MOTOR_COUNT)
+    {
+        return 0;
+    }
+
+    return motor_speed[motor];
+}
+
+/* 선택한 모터에 설정된 회전 방향을 반환 */
+motor_direction_t motor_get_direction(motor_t motor)
+{
+    if (motor >= MOTOR_COUNT)
+    {
+        return MOTOR_STOP;
+    }
+
+    return motor_direction[motor];
 }
