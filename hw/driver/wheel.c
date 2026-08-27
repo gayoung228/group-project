@@ -1,0 +1,378 @@
+#include "main.h"
+#include "wheel.h"
+#include "motor.h"
+#include "encoder.h"
+
+/* ------------------------------------------------------------------
+ * wheel.c - 바퀴 단위 PID 폐루프 속도 제어
+ *
+ * motor(출력) 와 encoder(입력) 를 묶어 목표 RPM 을 추종한다.
+ *
+ * encoder_get_rpm() 은 크기만 돌려주므로
+ * 회전 방향은 motor_get_direction() 으로 판단해 부호를 붙인다.
+ * ------------------------------------------------------------------ */
+
+/* 모터 출력의 최대값 [%] */
+#define WHEEL_OUTPUT_MAX        100
+
+/* 기어모터가 실제로 돌기 시작하는 최소 출력 [%]
+ * 이 값보다 작으면 소리만 나고 바퀴가 움직이지 않으므로
+ * 목표가 0 이 아닐 때는 최소한 이만큼은 넣어준다.
+ * 실측한 기동 듀티에 맞춰 조정할 것. */
+#define WHEEL_MIN_OUTPUT        70
+
+/* 적분항이 쌓일 수 있는 한계 (적분 포화 방지) */
+#define WHEEL_INTEGRAL_LIMIT    300.0f
+
+/* 목표 도달로 판단할 오차 범위 [RPM]
+ * 엔코더 분해능상 RPM 이 30 단위로 끊기므로 그보다 작게 잡으면 안 된다. */
+#define WHEEL_RPM_TOLERANCE     35.0f
+
+/* PID 게인 초기값 (실측 후 튜닝할 것) */
+#define WHEEL_DEFAULT_KP        0.30f
+#define WHEEL_DEFAULT_KI        0.05f
+#define WHEEL_DEFAULT_KD        0.005f
+
+/* 바퀴 개수 */
+#define WHEEL_COUNT             2
+
+
+/* 바퀴 한 개가 사용하는 모터와 엔코더 */
+typedef struct
+{
+    motor_t      motor;
+    encoder_id_t encoder;
+} wheel_hw_t;
+
+/* 바퀴 한 개의 제어 상태 */
+typedef struct
+{
+    float   target_rpm;     /* 목표 회전 속도 (전진 +, 후진 -) */
+    float   measured_rpm;   /* 부호를 붙인 실측 회전 속도 */
+    float   error;          /* 목표와 실측의 차이 */
+    float   integral;       /* 오차의 누적값 */
+    float   prev_error;     /* 직전 구간의 오차 */
+    int16_t output;         /* 모터에 적용한 출력 (-100~100) */
+} wheel_state_t;
+
+
+/* 좌우 바퀴가 어떤 모터와 엔코더를 쓰는지 정리한 표 */
+static const wheel_hw_t wheel_hw[WHEEL_COUNT] =
+{
+    /* WHEEL_LEFT  */ { MOTOR_LEFT,  ENCODER_LEFT  },
+    /* WHEEL_RIGHT */ { MOTOR_RIGHT, ENCODER_RIGHT }
+};
+
+static wheel_state_t wheel_state[WHEEL_COUNT];
+
+/* 좌우 공통 PID 게인 */
+static float wheel_kp = WHEEL_DEFAULT_KP;
+static float wheel_ki = WHEEL_DEFAULT_KI;
+static float wheel_kd = WHEEL_DEFAULT_KD;
+
+/* 폐루프 제어 사용 여부 */
+static bool wheel_enabled = true;
+
+
+/* 실수값을 지정한 범위 안으로 잘라주는 내부 함수 */
+static float wheel_clamp(float value, float min, float max)
+{
+    if (value > max)
+    {
+        return max;
+    }
+    if (value < min)
+    {
+        return min;
+    }
+    return value;
+}
+
+/* 엔코더가 준 RPM 크기에 모터 방향으로 부호를 붙여 돌려주는 내부 함수 */
+static float wheel_read_rpm(wheel_t wheel)
+{
+    float             rpm       = encoder_get_rpm(wheel_hw[wheel].encoder);
+    motor_direction_t direction = motor_get_direction(wheel_hw[wheel].motor);
+
+    /* 엔코더가 이미 부호를 붙여 주는 경우를 대비해 크기만 취한다 */
+    if (rpm < 0.0f)
+    {
+        rpm = -rpm;
+    }
+
+    if (direction == MOTOR_REVERSE)
+    {
+        return -rpm;
+    }
+    if (direction == MOTOR_FORWARD)
+    {
+        return rpm;
+    }
+
+    /* 정지 명령 상태라면 관성으로 굴러도 0 으로 본다 */
+    return 0.0f;
+}
+
+/* 바퀴 한 개의 PID 를 계산해 모터에 적용하는 내부 함수 */
+static void wheel_control(wheel_t wheel, float dt_s)
+{
+    wheel_state_t *state = &wheel_state[wheel];
+    float          derivative;
+    float          output;
+
+    state->measured_rpm = wheel_read_rpm(wheel);
+    state->error        = state->target_rpm - state->measured_rpm;
+
+    /* 목표가 0 이면 제어하지 않고 세운다.
+     * 이렇게 해야 정지 중에 적분항이 계속 쌓이지 않는다 */
+    if (state->target_rpm == 0.0f)
+    {
+        state->integral   = 0.0f;
+        state->prev_error = 0.0f;
+        state->output     = 0;
+
+        motor_stop(wheel_hw[wheel].motor);
+        return;
+    }
+
+    /* 적분항 : 정상상태 오차를 없애지만 과도하게 쌓이면 응답이 나빠진다 */
+    state->integral += state->error * dt_s;
+    state->integral  = wheel_clamp(state->integral,
+                                   -WHEEL_INTEGRAL_LIMIT,
+                                    WHEEL_INTEGRAL_LIMIT);
+
+    /* 미분항 : 오차의 변화율로 오버슈트를 억제한다 */
+    derivative        = (state->error - state->prev_error) / dt_s;
+    state->prev_error = state->error;
+
+    output = (wheel_kp * state->error)
+           + (wheel_ki * state->integral)
+           + (wheel_kd * derivative);
+
+    output = wheel_clamp(output, -(float)WHEEL_OUTPUT_MAX, (float)WHEEL_OUTPUT_MAX);
+
+    /* 기동 토크를 넘지 못하는 출력은 바퀴를 아예 못 돌리므로 끌어올린다 */
+    if ((output > 0.0f) && (output < (float)WHEEL_MIN_OUTPUT))
+    {
+        output = (float)WHEEL_MIN_OUTPUT;
+    }
+    if ((output < 0.0f) && (output > -(float)WHEEL_MIN_OUTPUT))
+    {
+        output = -(float)WHEEL_MIN_OUTPUT;
+    }
+
+    state->output = (int16_t)output;
+
+    motor_set_output(wheel_hw[wheel].motor, state->output);
+}
+
+
+/* 모터와 엔코더를 초기화하고 좌우 바퀴의 PID 상태를 준비한다. */
+void wheel_init(void)
+{
+    motor_init();
+    encoder_init();
+
+    wheel_kp      = WHEEL_DEFAULT_KP;
+    wheel_ki      = WHEEL_DEFAULT_KI;
+    wheel_kd      = WHEEL_DEFAULT_KD;
+    wheel_enabled = true;
+
+    wheel_reset();
+}
+
+/* 좌우 바퀴의 목표 RPM과 PID 누적 상태를 모두 초기화한다. */
+void wheel_reset(void)
+{
+    wheel_t wheel;
+
+    for (wheel = WHEEL_LEFT; wheel < WHEEL_COUNT; wheel++)
+    {
+        wheel_state[wheel].target_rpm   = 0.0f;
+        wheel_state[wheel].measured_rpm = 0.0f;
+        wheel_state[wheel].error        = 0.0f;
+        wheel_state[wheel].integral     = 0.0f;
+        wheel_state[wheel].prev_error   = 0.0f;
+        wheel_state[wheel].output       = 0;
+    }
+
+    encoder_reset();
+}
+
+/* 제어 주기마다 호출한다. 엔코더를 갱신하고 PID로 모터 출력을 계산한다. */
+void wheel_update(uint32_t elapsed_time_ms)
+{
+    wheel_t wheel;
+    float   dt_s;
+
+    if (elapsed_time_ms == 0)
+    {
+        return;
+    }
+
+    /* 먼저 엔코더를 갱신해야 최신 RPM 으로 제어할 수 있다 */
+    encoder_update(elapsed_time_ms);
+
+    /* 제어를 꺼 둔 상태에서는 측정만 하고 모터는 건드리지 않는다 */
+    if (wheel_enabled == false)
+    {
+        for (wheel = WHEEL_LEFT; wheel < WHEEL_COUNT; wheel++)
+        {
+            wheel_state[wheel].measured_rpm = wheel_read_rpm(wheel);
+        }
+        return;
+    }
+
+    dt_s = (float)elapsed_time_ms / 1000.0f;
+
+    for (wheel = WHEEL_LEFT; wheel < WHEEL_COUNT; wheel++)
+    {
+        wheel_control(wheel, dt_s);
+    }
+}
+
+/* 선택한 바퀴의 목표 회전 속도를 RPM으로 설정한다. */
+void wheel_set_target_rpm(wheel_t wheel, float target_rpm)
+{
+    if (wheel >= WHEEL_COUNT)
+    {
+        return;
+    }
+
+    /* 목표의 부호가 바뀌면 이전 오차가 방해가 되므로 누적을 지운다 */
+    if ((wheel_state[wheel].target_rpm * target_rpm) < 0.0f)
+    {
+        wheel_state[wheel].integral   = 0.0f;
+        wheel_state[wheel].prev_error = 0.0f;
+    }
+
+    wheel_state[wheel].target_rpm = target_rpm;
+}
+
+/* 좌우 바퀴의 목표 회전 속도를 한 번에 설정한다. */
+void wheel_set_target_rpm_both(float left_rpm, float right_rpm)
+{
+    wheel_set_target_rpm(WHEEL_LEFT,  left_rpm);
+    wheel_set_target_rpm(WHEEL_RIGHT, right_rpm);
+}
+
+/* 선택한 바퀴에 설정된 목표 RPM을 반환한다. */
+float wheel_get_target_rpm(wheel_t wheel)
+{
+    if (wheel >= WHEEL_COUNT)
+    {
+        return 0.0f;
+    }
+
+    return wheel_state[wheel].target_rpm;
+}
+
+/* 선택한 바퀴의 실측 RPM을 반환한다. */
+float wheel_get_rpm(wheel_t wheel)
+{
+    if (wheel >= WHEEL_COUNT)
+    {
+        return 0.0f;
+    }
+
+    return wheel_state[wheel].measured_rpm;
+}
+
+/* 선택한 바퀴의 목표 RPM과 실측 RPM의 차이를 반환한다. */
+float wheel_get_error(wheel_t wheel)
+{
+    if (wheel >= WHEEL_COUNT)
+    {
+        return 0.0f;
+    }
+
+    return wheel_state[wheel].error;
+}
+
+/* PID가 계산해 모터에 적용한 출력값을 반환한다. */
+int16_t wheel_get_output(wheel_t wheel)
+{
+    if (wheel >= WHEEL_COUNT)
+    {
+        return 0;
+    }
+
+    return wheel_state[wheel].output;
+}
+
+/* 좌우 바퀴에 공통으로 적용할 PID 게인을 설정한다. */
+void wheel_set_gain(float kp, float ki, float kd)
+{
+    wheel_t wheel;
+
+    wheel_kp = kp;
+    wheel_ki = ki;
+    wheel_kd = kd;
+
+    /* 게인이 바뀌면 이전 누적값은 의미가 없으므로 지운다 */
+    for (wheel = WHEEL_LEFT; wheel < WHEEL_COUNT; wheel++)
+    {
+        wheel_state[wheel].integral   = 0.0f;
+        wheel_state[wheel].prev_error = 0.0f;
+    }
+}
+
+/* 폐루프 제어를 켜거나 끈다. */
+void wheel_set_enabled(bool enabled)
+{
+    wheel_t wheel;
+
+    /* 제어를 다시 켤 때 이전 누적값이 튀어나오지 않게 지운다 */
+    if ((wheel_enabled == false) && (enabled == true))
+    {
+        for (wheel = WHEEL_LEFT; wheel < WHEEL_COUNT; wheel++)
+        {
+            wheel_state[wheel].integral   = 0.0f;
+            wheel_state[wheel].prev_error = 0.0f;
+        }
+    }
+
+    wheel_enabled = enabled;
+}
+
+/* 폐루프 제어가 켜져 있는지 반환한다. */
+bool wheel_is_enabled(void)
+{
+    return wheel_enabled;
+}
+
+/* 선택한 바퀴가 목표 RPM에 도달했는지 반환한다. */
+bool wheel_is_reached(wheel_t wheel)
+{
+    float error;
+
+    if (wheel >= WHEEL_COUNT)
+    {
+        return false;
+    }
+
+    error = wheel_state[wheel].error;
+    if (error < 0.0f)
+    {
+        error = -error;
+    }
+
+    return (error <= WHEEL_RPM_TOLERANCE);
+}
+
+/* 좌우 바퀴를 모두 정지시키고 PID 누적 상태를 초기화한다. */
+void wheel_stop(void)
+{
+    wheel_t wheel;
+
+    for (wheel = WHEEL_LEFT; wheel < WHEEL_COUNT; wheel++)
+    {
+        wheel_state[wheel].target_rpm = 0.0f;
+        wheel_state[wheel].error      = 0.0f;
+        wheel_state[wheel].integral   = 0.0f;
+        wheel_state[wheel].prev_error = 0.0f;
+        wheel_state[wheel].output     = 0;
+    }
+
+    motor_stop_all();
+}

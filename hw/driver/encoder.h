@@ -10,7 +10,7 @@ typedef enum{
 } encoder_id_t;
 
 void encoder_init(void);  // 좌우 엔코더 타이머 또는 인터럽트를 초기화
-
+   
 void encoder_reset(void);  // 좌우 엔코더 카운트와 RPM 계산값을 초기화
 
 void encoder_update(uint32_t elapsed_time_ms);  // 측정 시간 동안의 펄스 변화량을 이용해 RPM을 계산

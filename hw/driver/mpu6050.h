@@ -27,7 +27,4 @@ bool mpu6050_calibrate_gyro(uint16_t sample_count);
 
 bool mpu6050_is_ready(void);  // MPU6050 초기화 및 통신 가능 여부를 반환
 
-// MPU6050 초기화 + 워밍업 대기 + 자이로 영점 보정을 한 번에 수행
-bool mpu6050_start(void);
-
 #endif
