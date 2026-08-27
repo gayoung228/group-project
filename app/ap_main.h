@@ -1,4 +1,10 @@
-#include "main.h"
+#ifndef AP_MAIN_H
+#define AP_MAIN_H
 
-void ap_init(void); // 모든 드라이버와 제어 모듈을 초기화
-void ap_main(void); // 차량의 메인 제어 루프를 실행
+/* 모든 애플리케이션 모듈을 초기화한다. 프로그램 시작 시 한 번 호출한다. */
+void ap_init(void);
+
+/* 차량 애플리케이션의 메인 루프를 실행한다. */
+void ap_main(void);
+
+#endif
