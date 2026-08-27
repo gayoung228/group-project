@@ -277,6 +277,8 @@ void ap_init(void)
 /* 자이로 방향 유지 시험용 메인 루프. */
 void ap_main(void)
 {
+    extern void vl53l0x_serial_test_temp(void); vl53l0x_serial_test_temp(); /* TODO(vl53l0x 임시 테스트): 테스트 끝나면 이 줄만 삭제 */
+
     uint32_t control_tick = HAL_GetTick();
     uint32_t print_tick   = HAL_GetTick();
 
