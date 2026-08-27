@@ -1,36 +1,68 @@
-#ifndef HEADING_CONTROL_H
-#define HEADING_CONTROL_H
+#ifndef HEADING_H
+#define HEADING_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
-typedef struct{
-    float kp;                  // 방향 오차에 대한 비례 제어 
-    float max_correction;      // 좌우 모터에 적용할 최대 보정값
-} heading_control_config_t;
+/* ------------------------------------------------------------------
+ * heading.h - 자이로 기반 방향 유지 제어
+ *
+ * MPU6050 의 Yaw 각도를 읽어 기준 방향과의 오차를 PID 로 계산하고,
+ * 좌우 바퀴의 목표 RPM 에 반대 부호로 나눠 실어 방향을 잡는다.
+ *
+ *   왼쪽  목표 = 기본 속도 - 보정량
+ *   오른쪽 목표 = 기본 속도 + 보정량
+ *
+ * 기본 속도를 0 으로 두면 보정량만 남아 제자리 회전이 된다.
+ * 즉 직진 유지와 회전이 같은 방식으로 처리된다.
+ * ------------------------------------------------------------------ */
 
-void heading_control_init(void);    // 방향 유지 제어값과 기준 방향을 초기화
+// MPU6050 을 시작하고 방향 제어 상태를 준비한다.
+bool heading_init(void);
 
-void heading_control_reset(float initial_heading_deg);  // 현재 방향을 기준으로 누적 각도와 목표 방향을 초기화
+// 현재 향하고 있는 방향을 기준 방향(0도)으로 다시 잡는다.
+void heading_reset(void);
 
-// Z축 각속도를 적분하여 현재 방향과 보정값을 갱신
-void heading_control_update(float gyro_z_dps, float delta_time_sec);  
+// 제어 주기마다 호출한다. 자이로를 읽고 좌우 목표 RPM 을 갱신한다.
+void heading_update(uint32_t elapsed_time_ms);
 
-void heading_control_set_target(float target_heading_deg); // 차량이 유지해야 할 목표 진행 방향을 설정
+// 직진 기본 속도를 RPM 으로 설정한다. (전진 +, 후진 -, 제자리 회전 0)
+void heading_set_base_rpm(float base_rpm);
 
-void heading_control_set_config(const heading_control_config_t *config); // 비례 게인과 최대 보정값을 설정
+// 설정된 직진 기본 속도를 반환한다.
+float heading_get_base_rpm(void);
 
-void heading_control_enable(void);  // 방향 유지 보정값 계산을 활성화
+// 기준 방향을 현재 기준에서 상대 각도만큼 돌린다. (좌회전 +, 우회전 -)
+void heading_rotate(float delta_deg);
 
-void heading_control_disable(void);  // 장애물 회피 등을 위해 방향 유지 보정을 비활성화
+// 기준 방향을 절대 각도로 설정한다.
+void heading_set_target(float target_deg);
 
-bool heading_control_is_enabled(void);  // 방향 유지 기능의 활성화 여부를 반환
+// 현재 기준 방향을 반환한다.
+float heading_get_target(void);
 
-float heading_control_get_current(void); // 자이로 적분으로 계산된 현재 방향을 반환
+// 자이로가 측정한 현재 방향을 반환한다.
+float heading_get_current(void);
 
-float heading_control_get_target(void); // 설정된 목표 진행 방향을 반환
+// 기준 방향과 현재 방향의 차이를 반환한다.
+float heading_get_error(void);
 
-float heading_control_get_error(void);  // 목표 방향과 현재 방향의 오차를 반환
+// PID 가 계산한 좌우 보정량을 RPM 으로 반환한다.
+float heading_get_correction(void);
 
-float heading_control_get_correction(void);  // 좌우 모터에 적용할 방향 보정값을 반환
+// 방향 제어에 사용할 PID 게인을 설정한다.
+void heading_set_gain(float kp, float ki, float kd);
+
+// 방향 제어를 켜거나 끈다. 끄면 좌우에 기본 속도만 그대로 내려간다.
+void heading_set_enabled(bool enabled);
+
+// 방향 제어가 켜져 있는지 반환한다.
+bool heading_is_enabled(void);
+
+// 현재 방향이 기준 방향에 충분히 가까운지 반환한다.
+bool heading_is_aligned(void);
+
+// 주행을 멈추고 PID 누적 상태를 초기화한다. 기준 방향은 유지한다.
+void heading_stop(void);
 
 #endif
