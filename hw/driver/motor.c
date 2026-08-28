@@ -79,6 +79,7 @@ static const motor_hw_t motor_hw[MOTOR_COUNT] =
 /* 현재 설정된 상태를 기억해 두는 변수 (get 함수에서 사용) */
 static motor_direction_t motor_direction[MOTOR_COUNT];
 static uint8_t           motor_speed[MOTOR_COUNT];
+static bool              motor_ready = false;
 
 
 /* 0~100% 속도값을 타이머 비교값으로 바꿔 PWM 듀티에 적용하는 내부 함수 */
@@ -125,9 +126,10 @@ static void motor_write_direction(motor_t motor, GPIO_PinState in1, GPIO_PinStat
 
 
 /* 모터 방향 핀을 정지 상태로 만들고 좌우 PWM을 시작한다. */
-void motor_init(void)
+bool motor_init(void)
 {
     motor_t motor;
+    bool pwm_started = true;
 
     /* 초기화가 끝날 때까지 드라이버 출력을 막아 둔다 */
     HAL_GPIO_WritePin(MOTOR_STBY_PORT, MOTOR_STBY_PIN, GPIO_PIN_RESET);
@@ -139,12 +141,27 @@ void motor_init(void)
 
         motor_write_direction(motor, GPIO_PIN_RESET, GPIO_PIN_RESET);
 
-        HAL_TIM_PWM_Start(motor_hw[motor].pwm_tim, motor_hw[motor].pwm_channel);
+        if (HAL_TIM_PWM_Start(motor_hw[motor].pwm_tim,
+                              motor_hw[motor].pwm_channel) != HAL_OK)
+        {
+            pwm_started = false;
+        }
         motor_write_pwm(motor, 0);
     }
 
-    /* 모든 출력이 정지 상태임을 확인한 뒤 드라이버를 활성화한다 */
-    HAL_GPIO_WritePin(MOTOR_STBY_PORT, MOTOR_STBY_PIN, GPIO_PIN_SET);
+    /* 두 PWM이 모두 준비됐을 때만 드라이버를 활성화한다. */
+    motor_ready = pwm_started;
+    HAL_GPIO_WritePin(MOTOR_STBY_PORT,
+                      MOTOR_STBY_PIN,
+                      motor_ready ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+    return motor_ready;
+}
+
+/* 모터 PWM 초기화 결과를 반환한다. */
+bool motor_is_ready(void)
+{
+    return motor_ready;
 }
 
 /* 선택한 모터의 회전 방향을 설정한다. */

@@ -23,6 +23,15 @@ typedef enum
     AVOID_STATE_FAILED             // 장애물 회피 실패
 } avoid_state_t;
 
+typedef enum
+{
+    AVOID_FAILURE_NONE,
+    AVOID_FAILURE_NO_DIRECTION,
+    AVOID_FAILURE_FRONT_BLOCKED,
+    AVOID_FAILURE_TURN_TIMEOUT,
+    AVOID_FAILURE_MOTOR_STALL
+} avoid_failure_t;
+
 typedef struct
 {
     uint16_t obstacle_distance_mm;    // 장애물로 판단할 전방 거리
@@ -46,7 +55,11 @@ bool obstacle_avoidance_start(avoid_direction_t direction, float current_heading
 
 
 // 현재 방향과 이동 거리를 이용해 회피 상태를 갱신
-void obstacle_avoidance_update(float current_heading_deg, float current_distance_mm, uint16_t front_distance_mm); 
+void obstacle_avoidance_update(float current_heading_deg,
+                               float current_distance_mm,
+                               uint16_t front_distance_mm,
+                               float left_rpm,
+                               float right_rpm);
 
 avoid_state_t obstacle_avoidance_get_state(void);  // 현재 장애물 회피 단계를 반환
 
@@ -61,5 +74,11 @@ bool obstacle_avoidance_is_running(void);  // 장애물 회피 동작이 진행 
 bool obstacle_avoidance_is_completed(void);  // 장애물 회피가 정상적으로 완료됐는지 반환
 
 bool obstacle_avoidance_has_failed(void);  // 장애물 회피가 실패했는지 반환
+
+avoid_failure_t obstacle_avoidance_get_failure(void);
+
+uint8_t obstacle_avoidance_get_turn_step(void);
+
+uint32_t obstacle_avoidance_get_restart_count(void);
 
 #endif

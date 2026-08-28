@@ -44,6 +44,10 @@ float heading_get_target(void);
 // 자이로가 측정한 현재 방향을 반환한다.
 float heading_get_current(void);
 
+/* 차량 자세를 X=Roll, Y=Pitch, Z=Yaw로 반환한다.
+ * 표시용 Z축은 오른쪽 회전이 +, 왼쪽 회전이 -이며 모두 -180~180도 범위다. */
+bool heading_get_pose(float *x_deg, float *y_deg, float *z_deg);
+
 // 기준 방향과 현재 방향의 차이를 반환한다.
 float heading_get_error(void);
 
@@ -59,8 +63,14 @@ void heading_set_enabled(bool enabled);
 // 방향 제어가 켜져 있는지 반환한다.
 bool heading_is_enabled(void);
 
+// MPU6050 초기화와 가장 최근 자세 갱신이 정상인지 반환한다.
+bool heading_is_sensor_ready(void);
+
 // 직진 중 Yaw 오차가 안전 한계를 넘었는지 반환
 bool heading_has_runaway_fault(void);
+
+// 직진 중 45도 초과 안전정지를 켜거나 끈다. 방지턱 복구 중에만 잠시 끈다.
+void heading_set_runaway_protection(bool enabled);
 
 // 현재 방향이 기준 방향에 충분히 가까운지 반환한다.
 bool heading_is_aligned(void);

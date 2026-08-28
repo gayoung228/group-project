@@ -61,19 +61,39 @@ static const encoder_hw_t encoder_hw[ENCODER_COUNT] =
 
 /* 인터럽트에서 갱신되므로 volatile 로 선언한다 */
 static volatile encoder_state_t encoder_state[ENCODER_COUNT];
+static bool encoder_ready[ENCODER_COUNT];
 
 
 /* 좌우 엔코더 타이머 또는 인터럽트를 초기화 */
-void encoder_init(void)
+bool encoder_init(void)
 {
     encoder_id_t id;
+    bool all_ready = true;
 
     encoder_reset();
 
     for (id = ENCODER_LEFT; id < ENCODER_COUNT; id++)
     {
-        HAL_TIM_IC_Start_IT(&htim5, encoder_hw[id].channel);
+        encoder_ready[id] =
+            (HAL_TIM_IC_Start_IT(&htim5, encoder_hw[id].channel) == HAL_OK);
+        if (encoder_ready[id] == false)
+        {
+            all_ready = false;
+        }
     }
+
+    return all_ready;
+}
+
+/* 선택한 엔코더 입력 캡처가 정상적으로 시작됐는지 반환 */
+bool encoder_is_ready(encoder_id_t encoder)
+{
+    if (encoder >= ENCODER_COUNT)
+    {
+        return false;
+    }
+
+    return encoder_ready[encoder];
 }
 
 /* 좌우 엔코더 카운트와 RPM 계산값을 초기화 */

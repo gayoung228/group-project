@@ -233,7 +233,7 @@ static void ir_decode_feed(uint16_t interval)
  * Public API (hw/driver/ir_remote.h)
  * ============================================================================ */
 
-void ir_remote_init(void)
+bool ir_remote_init(void)
 {
     ir_ring_head = 0;
     ir_ring_tail = 0;
@@ -244,7 +244,7 @@ void ir_remote_init(void)
     ir_pending_new     = false;
     ir_last_frame_tick = 0;
 
-    HAL_TIM_IC_Start_IT(&htim4, TIM_CHANNEL_1);
+    return (HAL_TIM_IC_Start_IT(&htim4, TIM_CHANNEL_1) == HAL_OK);
 }
 
 void ir_remote_update(void)

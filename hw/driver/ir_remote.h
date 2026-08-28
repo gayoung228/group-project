@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 /* NEC IR 수신 상태머신을 초기화하고 TIM4 CH1 입력 캡처 인터럽트를 시작한다. */
-void ir_remote_init(void);
+bool ir_remote_init(void);
 
 /* 메인 루프에서 매 틱 호출한다. 링버퍼에 쌓인 캡처 간격을 꺼내
  * NEC 프레임(Leader/비트/inverse 검증/Repeat/140ms 창)으로 해석한다.

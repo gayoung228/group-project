@@ -16,7 +16,7 @@
  *               COMPLETED <- SECOND_TURN <- FORWARD
  *
  * 시험 애플리케이션에서는 LEFT 방향과 90도를 넘긴다.
- * 따라서 왼쪽 90도 회전 -> 설정 거리 전진 -> 오른쪽 90도 회전으로
+ * 따라서 왼쪽 30도씩 3회 -> 설정 거리 전진 -> 오른쪽 30도씩 3회로
  * 처음 진행 방향을 복구한다.
  * ------------------------------------------------------------------ */
 
@@ -37,7 +37,19 @@
 #define AVOID_SETTLE_TIME_MS            500
 
 /* 이 시간 안에 회전하지 못하면 안전을 위해 실패 정지한다 [ms] */
-#define AVOID_TURN_TIMEOUT_MS           5000
+#define AVOID_TURN_TIMEOUT_MS          12000U
+
+/* 관성에 의한 과회전을 줄이기 위해 90도를 세 구간으로 나눈다. */
+#define AVOID_TURN_STEP_COUNT              3U
+
+/* 회전 직후 정지 마찰을 확실히 넘기기 위한 전진 시동 출력과 유지 시간 */
+#define AVOID_FORWARD_KICK_OUTPUT       100
+#define AVOID_FORWARD_KICK_MS           300U
+
+/* 회피 전진은 wheel PID를 우회하므로 별도의 정지 감시가 필요하다. */
+#define AVOID_STALL_RPM_THRESHOLD       30.0f
+#define AVOID_STALL_DETECT_MS         5000U
+#define AVOID_STALL_RECOVER_MS        1000U
 
 
 static obstacle_avoidance_config_t avoid_config;
@@ -58,6 +70,18 @@ static float avoid_forward_start_mm = 0.0f;
 static uint32_t avoid_state_tick = 0;
 static uint32_t avoid_angle_tick = 0;
 static bool     avoid_angle_holding = false;
+static uint8_t  avoid_turn_step = 0;
+
+/* 회피 전진 중 한쪽 RPM이 낮을 때 한 번만 100% 재시동한다. */
+static bool     avoid_stall_timing = false;
+static uint32_t avoid_stall_tick = 0;
+static bool     avoid_stall_retry_used = false;
+static bool     avoid_stall_kick_active = false;
+static uint32_t avoid_stall_kick_tick = 0;
+static bool     avoid_stall_healthy_timing = false;
+static uint32_t avoid_stall_healthy_tick = 0;
+static uint32_t avoid_restart_count = 0;
+static avoid_failure_t avoid_failure = AVOID_FAILURE_NONE;
 
 /* 회피 동작이 요구하는 좌우 모터 목표 속도 */
 static int16_t avoid_left_speed  = 0;
@@ -141,6 +165,33 @@ static float avoid_turn_sign(void)
     return 1.0f;
 }
 
+/* 첫 회전의 현재 30도 단위 목표를 설정한다. */
+static void avoid_set_first_turn_target(void)
+{
+    float completed_angle = avoid_config.turn_angle_deg
+                          * (float)(avoid_turn_step + 1U)
+                          / (float)AVOID_TURN_STEP_COUNT;
+
+    avoid_target_heading_deg = avoid_normalize_360(
+        avoid_start_heading_deg + (completed_angle * avoid_turn_sign()));
+    avoid_angle_tick = 0;
+    avoid_angle_holding = false;
+}
+
+/* 복귀 회전의 현재 30도 단위 목표를 설정한다. */
+static void avoid_set_second_turn_target(void)
+{
+    float remaining_angle = avoid_config.turn_angle_deg
+                          * (float)(AVOID_TURN_STEP_COUNT
+                                    - avoid_turn_step - 1U)
+                          / (float)AVOID_TURN_STEP_COUNT;
+
+    avoid_target_heading_deg = avoid_normalize_360(
+        avoid_start_heading_deg + (remaining_angle * avoid_turn_sign()));
+    avoid_angle_tick = 0;
+    avoid_angle_holding = false;
+}
+
 /* 목표 방향을 향해 제자리 회전하도록 좌우 속도를 정하는 내부 함수
  * 허용 오차 안에 들어오면 출력을 끊어 목표 근처에서 튕기는 것을 막는다. */
 static void avoid_apply_rotation(float current_heading_deg)
@@ -215,6 +266,16 @@ void obstacle_avoidance_reset(void)
     avoid_start_heading_deg  = 0.0f;
     avoid_target_heading_deg = 0.0f;
     avoid_forward_start_mm   = 0.0f;
+    avoid_turn_step          = 0;
+    avoid_stall_timing       = false;
+    avoid_stall_tick         = 0;
+    avoid_stall_retry_used   = false;
+    avoid_stall_kick_active  = false;
+    avoid_stall_kick_tick    = 0;
+    avoid_stall_healthy_timing = false;
+    avoid_stall_healthy_tick = 0;
+    avoid_restart_count      = 0;
+    avoid_failure            = AVOID_FAILURE_NONE;
 
     avoid_set_output(0, 0);
     avoid_change_state(AVOID_STATE_IDLE);
@@ -261,6 +322,7 @@ bool obstacle_avoidance_start(avoid_direction_t direction,
 {
     if (direction == AVOID_DIRECTION_NONE)
     {
+        avoid_failure = AVOID_FAILURE_NO_DIRECTION;
         avoid_set_output(0, 0);
         avoid_change_state(AVOID_STATE_FAILED);
         return false;
@@ -270,6 +332,8 @@ bool obstacle_avoidance_start(avoid_direction_t direction,
     avoid_start_heading_deg  = avoid_normalize_360(current_heading_deg);
     avoid_target_heading_deg = avoid_start_heading_deg;
     avoid_forward_start_mm   = current_distance_mm;
+    avoid_turn_step          = 0;
+    avoid_failure            = AVOID_FAILURE_NONE;
 
     /* 우선 완전히 멈춘 뒤에 판단한다 */
     avoid_set_output(0, 0);
@@ -281,7 +345,9 @@ bool obstacle_avoidance_start(avoid_direction_t direction,
 /* 현재 방향과 이동 거리를 이용해 회피 상태를 갱신 */
 void obstacle_avoidance_update(float current_heading_deg,
                                float current_distance_mm,
-                               uint16_t front_distance_mm)
+                               uint16_t front_distance_mm,
+                               float left_rpm,
+                               float right_rpm)
 {
     switch (avoid_state)
     {
@@ -304,14 +370,14 @@ void obstacle_avoidance_update(float current_heading_deg,
 
             if (avoid_direction == AVOID_DIRECTION_NONE)
             {
+                avoid_failure = AVOID_FAILURE_NO_DIRECTION;
                 avoid_change_state(AVOID_STATE_FAILED);
                 break;
             }
 
-            /* 회피 시작 방향을 기준으로 정확히 왼쪽 90도 목표를 세운다. */
-            avoid_target_heading_deg = avoid_normalize_360(
-                avoid_start_heading_deg
-                + (avoid_config.turn_angle_deg * avoid_turn_sign()));
+            /* 90도 전체가 아니라 첫 번째 30도 목표부터 시작한다. */
+            avoid_turn_step = 0;
+            avoid_set_first_turn_target();
 
             avoid_change_state(AVOID_STATE_FIRST_TURN);
             break;
@@ -321,6 +387,7 @@ void obstacle_avoidance_update(float current_heading_deg,
 
             if (avoid_state_elapsed() >= AVOID_TURN_TIMEOUT_MS)
             {
+                avoid_failure = AVOID_FAILURE_TURN_TIMEOUT;
                 avoid_set_output(0, 0);
                 avoid_change_state(AVOID_STATE_FAILED);
                 break;
@@ -331,17 +398,30 @@ void obstacle_avoidance_update(float current_heading_deg,
                 break;
             }
 
+            if ((avoid_turn_step + 1U) < AVOID_TURN_STEP_COUNT)
+            {
+                /* 30도에서 잠시 안정된 뒤 다음 30도 목표로 이동한다. */
+                avoid_turn_step++;
+                avoid_set_first_turn_target();
+                break;
+            }
+
             /* 왼쪽을 향한 뒤에도 바로 앞이 막혀 있으면 진행하지 않는다. */
             if (front_distance_mm <= avoid_config.obstacle_distance_mm)
             {
+                avoid_failure = AVOID_FAILURE_FRONT_BLOCKED;
                 avoid_set_output(0, 0);
                 avoid_change_state(AVOID_STATE_FAILED);
                 break;
             }
 
             avoid_forward_start_mm = current_distance_mm;
-            avoid_set_output((int16_t)avoid_config.forward_speed,
-                             (int16_t)avoid_config.forward_speed);
+            avoid_stall_timing = false;
+            avoid_stall_retry_used = false;
+            avoid_stall_kick_active = false;
+            avoid_stall_healthy_timing = false;
+            avoid_set_output(AVOID_FORWARD_KICK_OUTPUT,
+                             AVOID_FORWARD_KICK_OUTPUT);
             avoid_change_state(AVOID_STATE_FORWARD);
             break;
 
@@ -349,19 +429,89 @@ void obstacle_avoidance_update(float current_heading_deg,
             /* 회피 전진 중 다시 막히면 추가 동작 없이 안전 정지한다. */
             if (front_distance_mm <= avoid_config.obstacle_distance_mm)
             {
+                avoid_failure = AVOID_FAILURE_FRONT_BLOCKED;
                 avoid_set_output(0, 0);
                 avoid_change_state(AVOID_STATE_FAILED);
                 break;
             }
 
-            avoid_set_output((int16_t)avoid_config.forward_speed,
-                             (int16_t)avoid_config.forward_speed);
+            if (left_rpm < 0.0f)  { left_rpm = -left_rpm; }
+            if (right_rpm < 0.0f) { right_rpm = -right_rpm; }
+
+            if ((left_rpm < AVOID_STALL_RPM_THRESHOLD)
+                || (right_rpm < AVOID_STALL_RPM_THRESHOLD))
+            {
+                avoid_stall_healthy_timing = false;
+
+                if (avoid_stall_timing == false)
+                {
+                    avoid_stall_timing = true;
+                    avoid_stall_tick = HAL_GetTick();
+                }
+                else if ((HAL_GetTick() - avoid_stall_tick) >=
+                         AVOID_STALL_DETECT_MS)
+                {
+                    if (avoid_stall_retry_used == false)
+                    {
+                        /* 첫 정지는 100% 시동을 한 번만 다시 건다. */
+                        avoid_stall_retry_used = true;
+                        avoid_restart_count++;
+                        avoid_stall_kick_active = true;
+                        avoid_stall_kick_tick = HAL_GetTick();
+                        avoid_stall_tick = HAL_GetTick();
+                    }
+                    else
+                    {
+                        /* 재시동 후에도 다시 5초간 RPM이 없으면 정지한다. */
+                        avoid_failure = AVOID_FAILURE_MOTOR_STALL;
+                        avoid_set_output(0, 0);
+                        avoid_change_state(AVOID_STATE_FAILED);
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                avoid_stall_timing = false;
+
+                if (avoid_stall_healthy_timing == false)
+                {
+                    avoid_stall_healthy_timing = true;
+                    avoid_stall_healthy_tick = HAL_GetTick();
+                }
+                else if ((HAL_GetTick() - avoid_stall_healthy_tick) >=
+                         AVOID_STALL_RECOVER_MS)
+                {
+                    avoid_stall_retry_used = false;
+                }
+            }
+
+            if (avoid_stall_kick_active
+                && ((HAL_GetTick() - avoid_stall_kick_tick) >=
+                    AVOID_FORWARD_KICK_MS))
+            {
+                avoid_stall_kick_active = false;
+            }
+
+            /* 회전 직후와 정지 복구 시에는 300ms 동안 100%로 출발한다. */
+            if ((avoid_state_elapsed() < AVOID_FORWARD_KICK_MS)
+                || avoid_stall_kick_active)
+            {
+                avoid_set_output(AVOID_FORWARD_KICK_OUTPUT,
+                                 AVOID_FORWARD_KICK_OUTPUT);
+            }
+            else
+            {
+                avoid_set_output((int16_t)avoid_config.forward_speed,
+                                 (int16_t)avoid_config.forward_speed);
+            }
 
             if ((current_distance_mm - avoid_forward_start_mm) >=
                 (float)avoid_config.bypass_distance_mm)
             {
-                /* 회피를 시작할 때의 방향으로 되돌린다 */
-                avoid_target_heading_deg = avoid_normalize_360(avoid_start_heading_deg);
+                /* 원래 방향까지 30도씩 세 단계로 되돌아간다. */
+                avoid_turn_step = 0;
+                avoid_set_second_turn_target();
 
                 avoid_change_state(AVOID_STATE_SECOND_TURN);
             }
@@ -372,6 +522,7 @@ void obstacle_avoidance_update(float current_heading_deg,
 
             if (avoid_state_elapsed() >= AVOID_TURN_TIMEOUT_MS)
             {
+                avoid_failure = AVOID_FAILURE_TURN_TIMEOUT;
                 avoid_set_output(0, 0);
                 avoid_change_state(AVOID_STATE_FAILED);
                 break;
@@ -382,11 +533,20 @@ void obstacle_avoidance_update(float current_heading_deg,
                 break;
             }
 
+            if ((avoid_turn_step + 1U) < AVOID_TURN_STEP_COUNT)
+            {
+                /* 60도, 30도, 0도 기준으로 30도씩 나누어 복귀한다. */
+                avoid_turn_step++;
+                avoid_set_second_turn_target();
+                break;
+            }
+
             avoid_set_output(0, 0);
 
             /* 원래 방향으로 돌아왔는데 또 막혀 있으면 직진하지 않는다. */
             if (front_distance_mm <= avoid_config.obstacle_distance_mm)
             {
+                avoid_failure = AVOID_FAILURE_FRONT_BLOCKED;
                 avoid_change_state(AVOID_STATE_FAILED);
                 break;
             }
@@ -447,4 +607,28 @@ bool obstacle_avoidance_is_completed(void)
 bool obstacle_avoidance_has_failed(void)
 {
     return (avoid_state == AVOID_STATE_FAILED);
+}
+
+/* 가장 최근 회피 실패 원인을 반환한다. */
+avoid_failure_t obstacle_avoidance_get_failure(void)
+{
+    return avoid_failure;
+}
+
+/* 회전 중 현재 진행 중인 30도 단계를 1~3으로 반환한다. */
+uint8_t obstacle_avoidance_get_turn_step(void)
+{
+    if ((avoid_state != AVOID_STATE_FIRST_TURN)
+        && (avoid_state != AVOID_STATE_SECOND_TURN))
+    {
+        return 0;
+    }
+
+    return (uint8_t)(avoid_turn_step + 1U);
+}
+
+/* 회피 전진 중 5초 저RPM으로 시동을 다시 건 횟수를 반환한다. */
+uint32_t obstacle_avoidance_get_restart_count(void)
+{
+    return avoid_restart_count;
 }

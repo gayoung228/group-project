@@ -9,7 +9,9 @@ typedef enum{
     ENCODER_RIGHT     // 오른쪽 바퀴 엔코더
 } encoder_id_t;
 
-void encoder_init(void);  // 좌우 엔코더 타이머 또는 인터럽트를 초기화
+bool encoder_init(void);  // 좌우 엔코더 입력 캡처를 시작하고 결과를 반환
+
+bool encoder_is_ready(encoder_id_t encoder);  // 선택한 엔코더 채널 초기화 결과
    
 void encoder_reset(void);  // 좌우 엔코더 카운트와 RPM 계산값을 초기화
 

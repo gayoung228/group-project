@@ -11,7 +11,7 @@ typedef enum
 } wheel_t;
 
 // 모터와 엔코더를 초기화하고 좌우 바퀴의 PID 상태를 준비한다.
-void wheel_init(void);
+bool wheel_init(void);
 
 // 좌우 바퀴의 목표 RPM과 PID 누적 상태를 모두 초기화한다.
 void wheel_reset(void);
@@ -51,6 +51,9 @@ bool wheel_is_reached(wheel_t wheel);
 
 // 출발 시간 내에 양쪽 엔코더가 모두 감지되지 않았는지 반환
 bool wheel_has_startup_fault(void);
+
+// 주행 중 저RPM 5초 감지로 시동 시퀀스를 재실행한 횟수
+uint32_t wheel_get_stall_restart_count(void);
 
 // 좌우 바퀴를 모두 정지시키고 PID 누적 상태를 초기화한다.
 void wheel_stop(void);

@@ -10,7 +10,7 @@
  * ir_remote_test.c - NEC IR 리모컨 단독 테스트
  *
  * hw/driver/ir_remote.c가 이미 해석해 둔 Addr/Cmd를 UART로 출력하고,
- * 실측한 "시작/정지" 버튼(RAW 0x00FF43BC, Addr=0x00 Cmd=0x43)이 새 명령으로
+ * 실측한 "시작/정지" 버튼(Addr=0x00 Cmd=0xC2)이 새 명령으로
  * 확인되면 drive_forward()를 한 번만 호출해 실제로 전진하는지 확인한다.
  *
  * 이 파일은 NEC 디코딩이나 주행 로직을 새로 만들지 않는다 - 전부 기존
@@ -22,9 +22,9 @@
 /* drive_update() 호출 주기 [ms] (heading_drive_test.c와 동일한 관례) */
 #define IR_TEST_CONTROL_PERIOD_MS   20U
 
-/* 실측한 "시작/정지" 버튼: RAW 0x00FF43BC = Addr 0x00 / Cmd 0x43 (inverse 0xBC) */
+/* 현재 NEC 디코더에서 실측한 "시작/정지" 버튼 값 */
 #define IR_TEST_START_ADDR   0x00U
-#define IR_TEST_START_CMD    0x43U
+#define IR_TEST_START_CMD    0xC2U
 
 extern UART_HandleTypeDef huart2;
 
@@ -44,7 +44,7 @@ void ir_remote_test_init(void)
     printf("\r\n=========================================\r\n");
     printf(" IR Remote Test (start button -> forward)\r\n");
     printf("=========================================\r\n");
-    printf(" start/stop RAW 0x00FF43BC (addr=0x00 cmd=0x43)\r\n");
+    printf(" start button (addr=0x00 cmd=0xC2)\r\n");
     printf("-----------------------------------------\r\n");
 }
 

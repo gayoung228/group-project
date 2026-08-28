@@ -119,6 +119,8 @@ typedef struct
 
     vl53l0x_meas_state_t meas_state;      /* 현재 측정 상태머신 단계 */
     uint32_t              meas_state_tick; /* 현재 단계에 진입한 시각(HAL_GetTick), WAIT_* timeout 판정용 */
+    bool                  measurement_new;   /* 새 거리 결과가 준비됐음을 알리는 1회성 이벤트 */
+    bool                  measurement_error; /* I2C 실패/timeout이 발생했음을 알리는 1회성 이벤트 */
 } vl53l0x_state_t;
 
 static vl53l0x_state_t vl53l0x_state[VL53L0X_COUNT];
@@ -807,6 +809,7 @@ static void vl53l0x_meas_step(vl53l0x_id_t sensor)
             {
                 /* 트리거 쓰기 자체가 실패 : IDLE에 남아 다음 틱에 다시 시도한다 */
                 state->valid = false;
+                state->measurement_error = true;
                 return;
             }
 
@@ -820,6 +823,7 @@ static void vl53l0x_meas_step(vl53l0x_id_t sensor)
             {
                 state->valid      = false;
                 state->meas_state = VL53L0X_MEAS_IDLE;
+                state->measurement_error = true;
                 return;
             }
 
@@ -835,6 +839,7 @@ static void vl53l0x_meas_step(vl53l0x_id_t sensor)
                 /* timeout : 이 센서만 invalid 처리하고 IDLE로 복구, 다른 센서엔 영향 없음 */
                 state->valid      = false;
                 state->meas_state = VL53L0X_MEAS_IDLE;
+                state->measurement_error = true;
             }
             return;
 
@@ -844,6 +849,7 @@ static void vl53l0x_meas_step(vl53l0x_id_t sensor)
             {
                 state->valid      = false;
                 state->meas_state = VL53L0X_MEAS_IDLE;
+                state->measurement_error = true;
                 return;
             }
 
@@ -860,10 +866,12 @@ static void vl53l0x_meas_step(vl53l0x_id_t sensor)
 
                     /* 0mm(측정 실패)와 VL53L0X_MAX_VALID_MM 초과(8190mm 계열 out-of-range 포함)는 무효 처리 */
                     state->valid = (range_mm > 0) && (range_mm <= VL53L0X_MAX_VALID_MM);
+                    state->measurement_new = true;
                 }
                 else
                 {
                     state->valid = false;
+                    state->measurement_error = true;
                 }
 
                 state->meas_state = VL53L0X_MEAS_IDLE;
@@ -875,6 +883,7 @@ static void vl53l0x_meas_step(vl53l0x_id_t sensor)
                 /* timeout : 이 센서만 invalid 처리하고 IDLE로 복구, 다른 센서엔 영향 없음 */
                 state->valid      = false;
                 state->meas_state = VL53L0X_MEAS_IDLE;
+                state->measurement_error = true;
             }
             return;
 
@@ -917,6 +926,8 @@ bool vl53l0x_init_sensor(vl53l0x_id_t sensor, uint8_t new_address)
 
     vl53l0x_state[sensor].ready = false;
     vl53l0x_state[sensor].valid = false;
+    vl53l0x_state[sensor].measurement_new = false;
+    vl53l0x_state[sensor].measurement_error = false;
 
     /* 재초기화 도중일 수 있으므로 진행 중이던 측정 상태머신도 IDLE로 되돌린다 */
     vl53l0x_state[sensor].meas_state = VL53L0X_MEAS_IDLE;
@@ -957,6 +968,9 @@ bool vl53l0x_init_sensor(vl53l0x_id_t sensor, uint8_t new_address)
 bool vl53l0x_init_all(void)
 {
     vl53l0x_init();
+
+    /* 재초기화 때도 XSHUT LOW가 충분히 유지되어 센서가 확실히 꺼지게 한다. */
+    HAL_Delay(VL53L0X_BOOT_DELAY_MS);
 
 #if VL53L0X_MULTI_SENSOR_ENABLE
     /* --------------------------------------------------------------------
@@ -1003,6 +1017,38 @@ bool vl53l0x_update_sensor(vl53l0x_id_t sensor)
     vl53l0x_meas_step(sensor);
 
     return true;
+}
+
+/* 새 거리 결과 이벤트를 한 번 꺼낸다. 측정 진행 중에는 false다. */
+bool vl53l0x_take_new_measurement(vl53l0x_id_t sensor)
+{
+    bool has_new_measurement;
+
+    if (sensor >= VL53L0X_COUNT)
+    {
+        return false;
+    }
+
+    has_new_measurement = vl53l0x_state[sensor].measurement_new;
+    vl53l0x_state[sensor].measurement_new = false;
+
+    return has_new_measurement;
+}
+
+/* I2C 실패 또는 측정 timeout 이벤트를 한 번 꺼낸다. */
+bool vl53l0x_take_measurement_error(vl53l0x_id_t sensor)
+{
+    bool has_error;
+
+    if (sensor >= VL53L0X_COUNT)
+    {
+        return false;
+    }
+
+    has_error = vl53l0x_state[sensor].measurement_error;
+    vl53l0x_state[sensor].measurement_error = false;
+
+    return has_error;
 }
 
 /* ready인 센서들의 측정 상태머신을 각각 한 단계씩 진행한다 (non-blocking, ready == false 인 센서는 건너뜀).

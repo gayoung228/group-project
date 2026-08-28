@@ -12,16 +12,19 @@
 
 /* 좌우에 실을 수 있는 보정량의 한계 [RPM]
  * 너무 크면 직진 중에 차가 좌우로 요동친다. */
-#define HEADING_CORRECTION_MAX      15.0f
+#define HEADING_CORRECTION_MAX      25.0f
+
+/* 모터 실측 제어 범위를 넘는 좌우 목표가 만들어지지 않게 한다. */
+#define HEADING_WHEEL_RPM_MAX      150.0f
 
 /* 직진 중 이 각도 이상 틀어지면 보정 방향/센서 이상으로 판단한다. */
 #define HEADING_RUNAWAY_LIMIT_DEG   45.0f
 
-/* 급격한 방향 전환을 막기 위해 20ms 제어 1회당 보정량을 6RPM만 바꾼다. */
-#define HEADING_CORRECTION_STEP      6.0f
+/* 보정 힘은 높이되 한 번에 튀지 않도록 20ms마다 최대 8RPM씩 바꾼다. */
+#define HEADING_CORRECTION_STEP      8.0f
 
 /* 제자리 회전이 센서/부호 문제로 멈추지 않는 경우의 안전 제한 [ms] */
-#define HEADING_ROTATION_TIMEOUT_MS  2000U
+#define HEADING_ROTATION_TIMEOUT_MS  5000U
 
 /* 적분항이 쌓일 수 있는 한계 (적분 포화 방지) */
 #define HEADING_INTEGRAL_LIMIT      200.0f
@@ -35,7 +38,7 @@
 
 /* PID 게인 초기값 (실측 후 튜닝할 것)
  * 오차 1도당 몇 RPM 을 보정할지가 Kp 의 의미이다. */
-#define HEADING_DEFAULT_KP          3.0f
+#define HEADING_DEFAULT_KP          4.0f
 #define HEADING_DEFAULT_KI          0.0f
 #define HEADING_DEFAULT_KD          0.0f
 
@@ -45,6 +48,8 @@ static float heading_target_deg = 0.0f;
 
 /* 자이로가 측정한 현재 방향 [도] */
 static float heading_current_deg = 0.0f;
+static float heading_roll_deg = 0.0f;
+static float heading_pitch_deg = 0.0f;
 
 /* 기준 방향과 현재 방향의 차이 [도] */
 static float heading_error_deg = 0.0f;
@@ -72,6 +77,8 @@ static float heading_kd = HEADING_DEFAULT_KD;
 /* 방향 제어 사용 여부 */
 static bool heading_enabled = false;
 static bool heading_runaway_fault = false;
+static bool heading_sensor_ready = false;
+static bool heading_runaway_protection = true;
 
 
 /* 실수값을 지정한 범위 안으로 잘라주는 내부 함수 */
@@ -152,6 +159,13 @@ static void heading_apply(void)
     left_rpm  = heading_base_rpm - heading_correction;
     right_rpm = heading_base_rpm + heading_correction;
 
+    left_rpm = heading_clamp(left_rpm,
+                             -HEADING_WHEEL_RPM_MAX,
+                              HEADING_WHEEL_RPM_MAX);
+    right_rpm = heading_clamp(right_rpm,
+                              -HEADING_WHEEL_RPM_MAX,
+                               HEADING_WHEEL_RPM_MAX);
+
     wheel_set_target_rpm_both(left_rpm, right_rpm);
 }
 
@@ -164,9 +178,13 @@ bool heading_init(void)
     heading_kd      = HEADING_DEFAULT_KD;
     heading_enabled = false;
     heading_runaway_fault = false;
+    heading_runaway_protection = true;
+    heading_sensor_ready = false;
 
     heading_target_deg  = 0.0f;
     heading_current_deg = 0.0f;
+    heading_roll_deg    = 0.0f;
+    heading_pitch_deg   = 0.0f;
     heading_error_deg   = 0.0f;
     heading_base_rpm    = 0.0f;
     heading_rotation_active = false;
@@ -177,7 +195,8 @@ bool heading_init(void)
 
     /* 초기화 + 워밍업 + 자이로 영점 보정을 한 번에 수행한다.
      * 이 동안 차체를 움직이면 영점이 틀어지므로 반드시 정지해 두어야 한다. */
-    return mpu6050_start();
+    heading_sensor_ready = mpu6050_start();
+    return heading_sensor_ready;
 }
 
 /* 현재 향하고 있는 방향을 기준 방향(0도)으로 다시 잡는다. */
@@ -187,6 +206,8 @@ void heading_reset(void)
 
     heading_target_deg  = 0.0f;
     heading_current_deg = 0.0f;
+    heading_roll_deg    = 0.0f;
+    heading_pitch_deg   = 0.0f;
     heading_error_deg   = 0.0f;
     heading_rotation_active = false;
     heading_rotation_direction = 0.0f;
@@ -216,17 +237,27 @@ void heading_update(uint32_t elapsed_time_ms)
     /* 센서를 읽고 각속도를 적분해 현재 자세를 갱신한다 */
     if (mpu6050_update() == false)
     {
+        heading_sensor_ready = false;
+        wheel_stop();
         return;
     }
     if (mpu6050_orientation_update(elapsed_time_ms) == false)
     {
+        heading_sensor_ready = false;
+        wheel_stop();
         return;
     }
     if (mpu6050_get_orientation(&roll_deg, &pitch_deg, &yaw_deg) == false)
     {
+        heading_sensor_ready = false;
+        wheel_stop();
         return;
     }
 
+    heading_sensor_ready = true;
+
+    heading_roll_deg    = heading_normalize_error(roll_deg);
+    heading_pitch_deg   = heading_normalize_error(pitch_deg);
     heading_current_deg = heading_normalize_360(yaw_deg);
     heading_target_deg  = heading_normalize_360(heading_target_deg);
     heading_error_deg   = heading_normalize_error(heading_target_deg
@@ -239,7 +270,8 @@ void heading_update(uint32_t elapsed_time_ms)
     }
 
     /* 직진/후진 중 45도 이상 틀어지면 유턴을 시도하지 않고 정지한다. */
-    if ((heading_base_rpm != 0.0f) &&
+    if (heading_runaway_protection
+        && (heading_base_rpm != 0.0f) &&
         (absolute_error >= HEADING_RUNAWAY_LIMIT_DEG))
     {
         heading_runaway_fault = true;
@@ -378,6 +410,26 @@ float heading_get_current(void)
     return heading_current_deg;
 }
 
+/* 자세 표시 좌표계를 반환한다.
+ * 내부 회전 제어는 좌회전을 +로 쓰지만, 사용자 로그의 Z축은 요청에 맞춰
+ * 오른쪽을 +로 표시하므로 Yaw 부호만 반대로 바꾼다. */
+bool heading_get_pose(float *x_deg, float *y_deg, float *z_deg)
+{
+    if ((heading_sensor_ready == false)
+        || (x_deg == NULL)
+        || (y_deg == NULL)
+        || (z_deg == NULL))
+    {
+        return false;
+    }
+
+    *x_deg = heading_roll_deg;
+    *y_deg = heading_pitch_deg;
+    *z_deg = heading_normalize_error(-heading_current_deg);
+
+    return true;
+}
+
 /* 기준 방향과 현재 방향의 차이를 반환한다. */
 float heading_get_error(void)
 {
@@ -418,10 +470,27 @@ bool heading_is_enabled(void)
     return heading_enabled;
 }
 
+/* MPU6050 초기화와 가장 최근 자세 갱신이 정상인지 반환한다. */
+bool heading_is_sensor_ready(void)
+{
+    return heading_sensor_ready;
+}
+
 /* 직진 중 Yaw 오차가 안전 한계를 넘었는지 반환한다. */
 bool heading_has_runaway_fault(void)
 {
     return heading_runaway_fault;
+}
+
+/* 방지턱 위에서 원래 방향을 복구하는 동안만 45도 즉시 정지를 끌 수 있다. */
+void heading_set_runaway_protection(bool enabled)
+{
+    heading_runaway_protection = enabled;
+
+    if (enabled == false)
+    {
+        heading_runaway_fault = false;
+    }
 }
 
 /* 현재 방향이 기준 방향에 충분히 가까운지 반환한다. */
