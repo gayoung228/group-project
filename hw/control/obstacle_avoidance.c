@@ -122,12 +122,22 @@ static float avoid_turn_sign(void)
     return 1.0f;
 }
 
-/* 목표 방향을 향해 제자리 회전하도록 좌우 속도를 정하는 내부 함수 */
+/* 목표 방향을 향해 제자리 회전하도록 좌우 속도를 정하는 내부 함수
+ * 허용 오차 안에 들어오면 출력을 끊어 목표 근처에서 튕기는 것을 막는다. */
 static void avoid_apply_rotation(float current_heading_deg)
 {
     int16_t speed = (int16_t)avoid_config.turn_speed;
+    float   error = avoid_target_heading_deg - current_heading_deg;
 
-    if (avoid_target_heading_deg > current_heading_deg)
+    /* 허용 오차 안이면 더 돌 필요가 없다 */
+    if ((error <= AVOID_ANGLE_TOLERANCE_DEG) &&
+        (error >= -AVOID_ANGLE_TOLERANCE_DEG))
+    {
+        avoid_set_output(0, 0);
+        return;
+    }
+
+    if (error > 0.0f)
     {
         /* 왼쪽으로 돌아야 한다 */
         avoid_set_output(-speed, speed);

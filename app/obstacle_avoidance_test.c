@@ -207,7 +207,7 @@ static void control_step(uint32_t dt)
     {
         /* 자이로 각도는 계속 적분해야 하므로 heading 은 갱신해 둔다 */
         heading_update(dt);
-        
+
         /* 회피 중에는 상태 머신이 계산한 속도를 모터에 직접 넣는다 */
         obstacle_avoidance_update(heading_get_current(),
                                   drive_get_distance_mm(),
