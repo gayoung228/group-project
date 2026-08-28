@@ -138,7 +138,7 @@ static void print_distance(void)
 /* 주행 중 상태를 한 줄로 출력한다. */
 static void print_status(void)
 {
-    printf("%-5s %s | raw:%4u r:%d v:%d | yaw:%5d | front:%4u | yaw:%5d | L:%4d(%4d) R:%4d(%4d) | dist:%5d mm\r\n",
+    printf("%-5s %s | raw:%4u r:%d v:%d | front:%4u | yaw:%5d | L:%4d(%4d) R:%4d(%4d) | dist:%5d mm\r\n",
            state_name(),
            direction_name(),
            vl53l0x_get_distance_mm(VL53L0X_FRONT),

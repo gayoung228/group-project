@@ -1,7 +1,7 @@
 # TERRA Rover Pin Map
 
 이 문서는 현재 `car_project.ioc`에 설정되어 있고 실제로 사용할 핀만 정리한다.
-예약 핀과 이전 IR 리모컨 및 HC-SR04 설정은 포함하지 않는다.
+예약 핀과 사용하지 않는 HC-SR04 설정은 포함하지 않는다.
 
 ## 하드웨어 구성
 
@@ -11,6 +11,7 @@
 - HC-020K 휠 엔코더 2개
 - MPU6050
 - VL53L0X 3개
+- IR 리모컨 수신기
 - ST-LINK Virtual COM Port
 
 ## 전체 핀맵
@@ -31,6 +32,7 @@
 | 왼쪽 거리 센서 종료 제어 | `TOF_LEFT_XSHUT` | A2 | PA4 | GPIO Output Open-Drain | 왼쪽 VL53L0X XSHUT |
 | 정면 거리 센서 종료 제어 | `TOF_FRONT_XSHUT` | D2 | PA10 | GPIO Output Open-Drain | 정면 VL53L0X XSHUT |
 | 오른쪽 거리 센서 종료 제어 | `TOF_RIGHT_XSHUT` | A3 | PB0 | GPIO Output Open-Drain | 오른쪽 VL53L0X XSHUT |
+| IR 리모컨 수신 신호 | — | D10 | PB6 | TIM4_CH1 Input Capture | IR 수신기 OUT |
 | 디버그 UART 송신 | `USART_TX` | D1 | PA2 | USART2_TX | ST-LINK Virtual COM Port |
 | 디버그 UART 수신 | `USART_RX` | D0 | PA3 | USART2_RX | ST-LINK Virtual COM Port |
 
@@ -85,6 +87,41 @@ TIM5 Interrupt     : Enabled
 ```
 
 두 엔코더는 서로 다른 바퀴의 단일 펄스 신호이므로 TIM5의 Encoder Mode가 아니라 CH1과 CH2의 Input Capture를 사용한다.
+
+## IR 리모컨 연결
+
+```text
+IR 수신기 OUT → NUCLEO D10 / PB6 / TIM4_CH1
+IR 수신기 VCC → NUCLEO 3.3V
+IR 수신기 GND → NUCLEO GND
+```
+
+TIM4 설정:
+
+```text
+Clock Source       : Internal Clock
+Prescaler          : 83
+Counter Period     : 65535
+Channel 1          : Input Capture Direct Mode
+Polarity           : Falling Edge
+Input Prescaler    : No Division
+Input Filter       : 4
+TIM4 Interrupt     : Enabled
+Interrupt Priority : 0
+```
+
+TIM4의 입력 클럭은 84MHz이다. Prescaler가 83이므로 타이머 카운트 1은
+`1us`를 뜻하며, IR 수신기의 하강 에지 사이 시간을 마이크로초 단위로 측정할 수 있다.
+
+CubeMX는 TIM4와 인터럽트 핸들러를 생성하지만 입력 캡처 측정을 자동으로 시작하지는
+않는다. 리모컨 드라이버 초기화에서 다음 함수를 한 번 호출해야 한다.
+
+```c
+HAL_TIM_IC_Start_IT(&htim4, TIM_CHANNEL_1);
+```
+
+인터럽트에서는 캡처 시간과 수신 플래그만 저장한다. 버튼 코드 해석, UART 출력,
+모터 명령 처리는 메인 제어 흐름에서 수행하여 엔코더 TIM5 인터럽트를 방해하지 않도록 한다.
 
 ## I2C 센서 연결
 
