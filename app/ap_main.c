@@ -1,5 +1,5 @@
 #include "ap_main.h"
-#include "heading_drive_test.h"
+#include "obstacle_avoidance_test.h"
 
 /* ------------------------------------------------------------------
  * ap_main.c - 애플리케이션 진입점
@@ -14,11 +14,11 @@
 /* 프로그램 시작 시 한 번 호출되는 애플리케이션 초기화 함수 */
 void ap_init(void)
 {
-    heading_drive_test_init();
+    obstacle_avoidance_test_init();
 }
 
 /* 초기화 후 진입하는 애플리케이션 실행 함수 */
 void ap_main(void)
 {
-    heading_drive_test_run();
+    obstacle_avoidance_test_run();
 }
