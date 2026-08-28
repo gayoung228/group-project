@@ -1,6 +1,7 @@
 #include "main.h"
 #include "encoder.h"
 #include "motor.h"
+#include "ir_remote.h"
 
 /* ------------------------------------------------------------------
  * 하드웨어 배선 (Pin Map 문서 기준)
@@ -200,6 +201,13 @@ bool encoder_is_running(encoder_id_t encoder)
 
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
+    /* HAL의 weak 콜백이라 프로젝트에 이 함수가 한 곳에만 있을 수 있어,
+     * 다른 타이머(IR/TIM4)를 쓰는 hw/driver/ir_remote.c와 이 콜백 하나를
+     * 공유한다. 그쪽 판단(TIM4가 맞는지, 캡처 레지스터를 어떻게 읽는지)은
+     * 전부 ir_remote_capture_callback() 안에 있어서 여기서는 그냥 매번
+     * 넘겨주기만 하면 된다 - 이 파일은 TIM4에 대해 아무것도 몰라도 된다. */
+    ir_remote_capture_callback(htim);
+
     if (htim->Instance != TIM5)
     {
         return;

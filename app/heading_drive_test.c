@@ -4,6 +4,7 @@
 #include "heading_control.h"
 #include "wheel.h"
 #include "encoder.h"
+#include "vl53l0x_test.h"
 #include <stdio.h>
 
 /* ------------------------------------------------------------------
@@ -349,6 +350,10 @@ void heading_drive_test_init(void)
 
     /* drive_init 안에서 motor, encoder, MPU6050, PID가 차례로 초기화된다. */
     drive_init();
+
+    /* VL53L0X 초기화/상태머신/출력은 전부 vl53l0x_test.c가 담당한다 - 여기서는
+     * 그 대표 초기화 함수만 호출한다. */
+    vl53l0x_test_init();
 }
 
 void heading_drive_test_run(void)
@@ -374,6 +379,11 @@ void heading_drive_test_run(void)
             print_tick += TEST_PRINT_PERIOD_MS;
             test_print_status();
         }
+
+        /* VL53L0X 상태머신을 한 단계 진행시킨다 (non-blocking, 즉시 반환).
+         * MPU6050과 같은 I2C1 버스를 쓰므로 이 foreground while(1) 안에서
+         * 위 로직들과 순서대로(=동시에 아님) 실행된다. */
+        vl53l0x_test_update();
     }
 }
 

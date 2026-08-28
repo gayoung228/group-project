@@ -94,6 +94,19 @@ static const vl53l0x_pin_map_t vl53l0x_pin_map[VL53L0X_COUNT] =
     [VL53L0X_RIGHT] = { TOF_RIGHT_XSHUT_GPIO_Port, TOF_RIGHT_XSHUT_Pin, VL53L0X_RIGHT_ADDRESS },
 };
 
+/* 센서 1개의 non-blocking 단발 측정 상태머신 단계.
+ *
+ * START(쓰기만 하고 끝)와 READ_RESULT(읽고 캐시 갱신만 하고 끝)는 기다릴 조건이
+ * 없는 즉시 실행 액션이라 별도 단계로 유지하지 않고, IDLE 진입 시 / WAIT_RESULT에서
+ * 준비 확인된 그 즉시 같은 호출 안에서 처리한다. 그래서 실제로 여러 호출에 걸쳐
+ * 유지되는 단계는 이 3개뿐이다. */
+typedef enum
+{
+    VL53L0X_MEAS_IDLE = 0,          /* 새 측정을 시작할 수 있는 상태 */
+    VL53L0X_MEAS_WAIT_START_CLEAR,  /* SYSRANGE_START 비트가 0이 되길 기다리는 중 */
+    VL53L0X_MEAS_WAIT_RESULT        /* RESULT_INTERRUPT_STATUS 가 준비되길 기다리는 중 */
+} vl53l0x_meas_state_t;
+
 /* 센서별 내부 상태 (ready/valid/거리값 + Pololu VL53L0X::init()이 쓰는 stop_variable) */
 typedef struct
 {
@@ -103,6 +116,9 @@ typedef struct
     uint16_t distance_mm;   /* 가장 최근 측정 거리 [mm] (I2C가 성공한 원시 측정값, 유효성과 무관하게 저장) */
     bool     obstacle;      /* vl53l0x_obstacle_update()가 저장한 가장 최근 장애물 판정 결과 */
     uint8_t  stop_variable; /* VL53L0X::init()에서 읽어 측정 시작마다 재사용하는 내부 상태값 */
+
+    vl53l0x_meas_state_t meas_state;      /* 현재 측정 상태머신 단계 */
+    uint32_t              meas_state_tick; /* 현재 단계에 진입한 시각(HAL_GetTick), WAIT_* timeout 판정용 */
 } vl53l0x_state_t;
 
 static vl53l0x_state_t vl53l0x_state[VL53L0X_COUNT];
@@ -760,76 +776,112 @@ static bool vl53l0x_dev_init(uint8_t addr, uint8_t *stop_variable_out)
 
 
 /* ----------------------------------------------------------------------------
- * 단발(single-shot) 거리 측정
- * (VL53L0X_PerformSingleRangingMeasurement 이식)
+ * 단발(single-shot) 거리 측정 — non-blocking 상태머신
+ * (VL53L0X_PerformSingleRangingMeasurement 을 폴링 루프 없이 1단계씩 이식)
+ *
+ * 이 함수는 폴링 for(;;)를 절대 쓰지 않는다. 호출 한 번에 현재 단계에 맞는
+ * 일만 하고 즉시 리턴하며, 실제 측정이 끝날 때까지는 여러 번(=여러 실행 틱)
+ * 호출되어야 한다. 대기 조건이 있는 두 단계(WAIT_START_CLEAR, WAIT_RESULT)만
+ * vl53l0x_state[sensor].meas_state 로 다음 호출까지 유지된다.
  * -------------------------------------------------------------------------- */
 
-static bool vl53l0x_read_range_single_mm(uint8_t addr, uint8_t stop_variable, uint16_t *range_mm)
+static void vl53l0x_meas_step(vl53l0x_id_t sensor)
 {
-    uint32_t start_tick;
-    uint8_t  val;
+    vl53l0x_state_t *state = &vl53l0x_state[sensor];
+    uint8_t           addr  = state->address;
+    uint8_t           val;
 
-    vl53l0x_write8(addr, 0x80, 0x01);
-    vl53l0x_write8(addr, 0xFF, 0x01);
-    vl53l0x_write8(addr, 0x00, 0x00);
-    vl53l0x_write8(addr, 0x91, stop_variable);
-    vl53l0x_write8(addr, 0x00, 0x01);
-    vl53l0x_write8(addr, 0xFF, 0x00);
-    vl53l0x_write8(addr, 0x80, 0x00);
-
-    if (!vl53l0x_write8(addr, VL53L0X_REG_SYSRANGE_START, 0x01))
+    switch (state->meas_state)
     {
-        return false;
+        case VL53L0X_MEAS_IDLE:
+            /* ---- START : 측정 트리거만 쓰고 바로 WAIT_START_CLEAR 로 넘어간다 ---- */
+            vl53l0x_write8(addr, 0x80, 0x01);
+            vl53l0x_write8(addr, 0xFF, 0x01);
+            vl53l0x_write8(addr, 0x00, 0x00);
+            vl53l0x_write8(addr, 0x91, state->stop_variable);
+            vl53l0x_write8(addr, 0x00, 0x01);
+            vl53l0x_write8(addr, 0xFF, 0x00);
+            vl53l0x_write8(addr, 0x80, 0x00);
+
+            if (!vl53l0x_write8(addr, VL53L0X_REG_SYSRANGE_START, 0x01))
+            {
+                /* 트리거 쓰기 자체가 실패 : IDLE에 남아 다음 틱에 다시 시도한다 */
+                state->valid = false;
+                return;
+            }
+
+            state->meas_state      = VL53L0X_MEAS_WAIT_START_CLEAR;
+            state->meas_state_tick = HAL_GetTick();
+            return;
+
+        case VL53L0X_MEAS_WAIT_START_CLEAR:
+            /* "Wait until start bit has been cleared" 를 한 번만 확인한다 */
+            if (!vl53l0x_read8(addr, VL53L0X_REG_SYSRANGE_START, &val))
+            {
+                state->valid      = false;
+                state->meas_state = VL53L0X_MEAS_IDLE;
+                return;
+            }
+
+            if ((val & 0x01) == 0)
+            {
+                state->meas_state      = VL53L0X_MEAS_WAIT_RESULT;
+                state->meas_state_tick = HAL_GetTick();
+                return;
+            }
+
+            if ((HAL_GetTick() - state->meas_state_tick) > VL53L0X_IO_TIMEOUT_MS)
+            {
+                /* timeout : 이 센서만 invalid 처리하고 IDLE로 복구, 다른 센서엔 영향 없음 */
+                state->valid      = false;
+                state->meas_state = VL53L0X_MEAS_IDLE;
+            }
+            return;
+
+        case VL53L0X_MEAS_WAIT_RESULT:
+            /* 결과 준비 여부를 한 번만 확인한다 */
+            if (!vl53l0x_read8(addr, VL53L0X_REG_RESULT_INTERRUPT_STATUS, &val))
+            {
+                state->valid      = false;
+                state->meas_state = VL53L0X_MEAS_IDLE;
+                return;
+            }
+
+            if ((val & 0x07) != 0)
+            {
+                /* ---- READ_RESULT : 준비된 그 즉시 같은 호출 안에서 읽고 캐시 갱신 ---- */
+                uint16_t range_mm = 0;
+
+                if (vl53l0x_read16(addr, VL53L0X_REG_RESULT_RANGE_STATUS + 10, &range_mm))
+                {
+                    vl53l0x_write8(addr, VL53L0X_REG_SYSTEM_INTERRUPT_CLEAR, 0x01);
+
+                    state->distance_mm = range_mm;
+
+                    /* 0mm(측정 실패)와 VL53L0X_MAX_VALID_MM 초과(8190mm 계열 out-of-range 포함)는 무효 처리 */
+                    state->valid = (range_mm > 0) && (range_mm <= VL53L0X_MAX_VALID_MM);
+                }
+                else
+                {
+                    state->valid = false;
+                }
+
+                state->meas_state = VL53L0X_MEAS_IDLE;
+                return;
+            }
+
+            if ((HAL_GetTick() - state->meas_state_tick) > VL53L0X_IO_TIMEOUT_MS)
+            {
+                /* timeout : 이 센서만 invalid 처리하고 IDLE로 복구, 다른 센서엔 영향 없음 */
+                state->valid      = false;
+                state->meas_state = VL53L0X_MEAS_IDLE;
+            }
+            return;
+
+        default:
+            state->meas_state = VL53L0X_MEAS_IDLE;
+            return;
     }
-
-    /* "Wait until start bit has been cleared" */
-    start_tick = HAL_GetTick();
-    for (;;)
-    {
-        if (!vl53l0x_read8(addr, VL53L0X_REG_SYSRANGE_START, &val))
-        {
-            return false;
-        }
-
-        if ((val & 0x01) == 0)
-        {
-            break;
-        }
-
-        if ((HAL_GetTick() - start_tick) > VL53L0X_IO_TIMEOUT_MS)
-        {
-            return false;
-        }
-    }
-
-    start_tick = HAL_GetTick();
-    for (;;)
-    {
-        if (!vl53l0x_read8(addr, VL53L0X_REG_RESULT_INTERRUPT_STATUS, &val))
-        {
-            return false;
-        }
-
-        if ((val & 0x07) != 0)
-        {
-            break;
-        }
-
-        if ((HAL_GetTick() - start_tick) > VL53L0X_IO_TIMEOUT_MS)
-        {
-            return false;
-        }
-    }
-
-    /* Linearity Corrective Gain = 1000(기본값), fractional ranging 미사용을 가정한다 */
-    if (!vl53l0x_read16(addr, VL53L0X_REG_RESULT_RANGE_STATUS + 10, range_mm))
-    {
-        return false;
-    }
-
-    vl53l0x_write8(addr, VL53L0X_REG_SYSTEM_INTERRUPT_CLEAR, 0x01);
-
-    return true;
 }
 
 
@@ -865,6 +917,9 @@ bool vl53l0x_init_sensor(vl53l0x_id_t sensor, uint8_t new_address)
 
     vl53l0x_state[sensor].ready = false;
     vl53l0x_state[sensor].valid = false;
+
+    /* 재초기화 도중일 수 있으므로 진행 중이던 측정 상태머신도 IDLE로 되돌린다 */
+    vl53l0x_state[sensor].meas_state = VL53L0X_MEAS_IDLE;
 
     /* 이 센서만 XSHUT High : 하드웨어 스탠바이 해제 */
     HAL_GPIO_WritePin(vl53l0x_pin_map[sensor].xshut_port, vl53l0x_pin_map[sensor].xshut_pin,
@@ -926,42 +981,33 @@ bool vl53l0x_init_all(void)
 #endif
 }
 
-/* 선택한 센서의 거리값을 한 번(single-shot) 측정하고 저장.
+/* 선택한 센서의 측정 상태머신을 "한 단계만" 진행한다 (non-blocking).
  *
- * 반환값은 "I2C 측정 트랜잭션 자체가 성공했는지"만 의미한다. 측정된 거리값이
- * 실제로 쓸만한 값인지(0이 아니고 VL53L0X_MAX_VALID_MM 이하인지)는 별도로
- * state.valid에 저장하며, vl53l0x_is_valid()로 조회한다. distance_mm은
- * I2C가 성공하기만 하면 out-of-range(8190mm 계열 포함) 값이라도 원시 측정값을
- * 그대로 저장한다 — vl53l0x_get_distance_mm()은 가공 없이 그 값을 돌려준다. */
+ * 폴링 for(;;)이 전혀 없으므로 즉시 리턴한다. 실제로 새 거리값이 distance_mm/valid에
+ * 반영되는 시점은 상태머신이 READ_RESULT 단계까지 도달했을 때뿐이며, 그 전까지는
+ * 이전에 측정된 값이 그대로 남아 있다(= 이 호출이 곧바로 새 측정값을 보장하지 않는다,
+ * 예전의 blocking single-shot 버전과 달라진 부분). 매 실행 틱마다 반복 호출해서
+ * 상태머신을 계속 앞으로 진행시켜야 한다.
+ *
+ * 반환값은 "이 센서에 대해 상태머신 스텝을 실제로 시도했는지"만 의미한다
+ * (센서 id가 유효하고 ready == true일 때 true). 이번 스텝에서 I2C 트랜잭션이
+ * 실패하거나 timeout이 나도 별도 처리 없이 true를 반환하며, 그 결과는
+ * state.valid / vl53l0x_is_valid()에 반영된다. */
 bool vl53l0x_update_sensor(vl53l0x_id_t sensor)
 {
-    uint16_t range_mm = 0;
-    bool     ok;
-
     if (sensor >= VL53L0X_COUNT || !vl53l0x_state[sensor].ready)
     {
         return false;
     }
 
-    ok = vl53l0x_read_range_single_mm(vl53l0x_state[sensor].address,
-                                       vl53l0x_state[sensor].stop_variable,
-                                       &range_mm);
-
-    if (!ok)
-    {
-        vl53l0x_state[sensor].valid = false;
-        return false;
-    }
-
-    vl53l0x_state[sensor].distance_mm = range_mm;
-
-    /* 0mm(측정 실패)와 VL53L0X_MAX_VALID_MM 초과(8190mm 계열 out-of-range 포함)는 무효 처리 */
-    vl53l0x_state[sensor].valid = (range_mm > 0) && (range_mm <= VL53L0X_MAX_VALID_MM);
+    vl53l0x_meas_step(sensor);
 
     return true;
 }
 
-/* 세 센서를 순차적으로 측정하여 거리값을 갱신 (ready == false 인 센서는 건너뜀) */
+/* ready인 센서들의 측정 상태머신을 각각 한 단계씩 진행한다 (non-blocking, ready == false 인 센서는 건너뜀).
+ * 새 거리값이 실제로 반영되는 시점은 센서마다 상태머신이 READ_RESULT에 도달하는 순간이며,
+ * 이는 이 함수가 여러 번(=여러 실행 틱) 호출된 뒤일 수 있다. */
 void vl53l0x_update(void)
 {
     vl53l0x_id_t sensor;
@@ -1008,11 +1054,15 @@ bool vl53l0x_is_valid(vl53l0x_id_t sensor)
     return vl53l0x_state[sensor].valid;
 }
 
-/* LEFT/FRONT/RIGHT(ready인 센서만) 거리값을 모두 갱신하고 장애물 여부를 판정해 저장.
+/* LEFT/FRONT/RIGHT(ready인 센서만) 각각 측정 상태머신을 한 단계씩 진행하고,
+ * 현재 캐시된 값 기준으로 장애물 여부를 판정해 저장한다 (non-blocking, 내부 폴링 없음).
  *
  * ready == false인 센서(현재 VL53L0X_MULTI_SENSOR_ENABLE == 0이면 LEFT/RIGHT)는
- * 측정을 시도하지 않고 obstacle을 안전하게 false로만 둔 채 건너뛴다.
- * 판정 규칙 : valid == true && distance_mm <= threshold_mm 이면 obstacle = true. */
+ * 상태머신 자체를 진행시키지 않고 obstacle을 안전하게 false로만 둔 채 건너뛴다.
+ * 판정 규칙 : valid == true && distance_mm <= threshold_mm 이면 obstacle = true.
+ * distance_mm/valid는 해당 센서의 상태머신이 READ_RESULT에 도달한 틱에만 갱신되므로,
+ * 이 함수를 20ms 등 짧은 주기로 반복 호출해도 매번 새 측정이 끝나는 것은 아니다 —
+ * 그 사이에는 직전에 확정된 값 기준으로 obstacle이 재계산된다. */
 void vl53l0x_obstacle_update(uint16_t threshold_mm)
 {
     vl53l0x_id_t sensor;
