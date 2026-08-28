@@ -12,7 +12,7 @@
 // 이 프로젝트의 실측 기준 "안정 운용 상한값" [mm]. VL53L0X의 물리적 측정 한계가
 // 아니라, 약 1200mm를 넘어서면 8190mm 계열 out-of-range 값이 자주 섞여 나와서
 // 이 프로젝트에서 유효 거리로 인정하는 상한을 1200mm로 정한 것이다.
-#define VL53L0X_MAX_VALID_MM       8000U
+#define VL53L0X_MAX_VALID_MM       1200U
 
 typedef enum{
     VL53L0X_FRONT,    // 차량 전방에 장착된 거리 센서

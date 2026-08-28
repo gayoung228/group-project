@@ -15,7 +15,7 @@ typedef enum
 {
     AVOID_STATE_IDLE,              // 장애물 회피 대기
     AVOID_STATE_STOP,              // 장애물 앞에서 정지
-    AVOID_STATE_CHECK_SPACE,       // 좌우 공간 확인
+    AVOID_STATE_CHECK_SPACE,       // 회피 방향과 90도 목표 각도 준비
     AVOID_STATE_FIRST_TURN,        // 회피 방향으로 첫 번째 90도 회전
     AVOID_STATE_FORWARD,           // 장애물 옆으로 설정 거리만큼 전진
     AVOID_STATE_SECOND_TURN,       // 원래 진행 방향으로 두 번째 90도 회전
