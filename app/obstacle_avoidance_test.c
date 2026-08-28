@@ -138,13 +138,15 @@ static void print_distance(void)
 /* 주행 중 상태를 한 줄로 출력한다. */
 static void print_status(void)
 {
-    printf("%-5s %s | front:%4u | yaw:%5d | L:%4d R:%4d | dist:%5d mm\r\n",
+    printf("%-5s %s | front:%4u | yaw:%5d | L:%4d(%4d) R:%4d(%4d) | dist:%5d mm\r\n",
            state_name(),
            direction_name(),
            read_front_mm(),
            (int)heading_get_current(),
            obstacle_avoidance_get_left_speed(),
+           motor_get_speed(MOTOR_LEFT),
            obstacle_avoidance_get_right_speed(),
+           motor_get_speed(MOTOR_RIGHT),
            (int)drive_get_distance_mm());
 }
 
@@ -203,6 +205,9 @@ static void control_step(uint32_t dt)
 
     if (test_avoiding == true)
     {
+        /* 자이로 각도는 계속 적분해야 하므로 heading 은 갱신해 둔다 */
+        heading_update(dt);
+        
         /* 회피 중에는 상태 머신이 계산한 속도를 모터에 직접 넣는다 */
         obstacle_avoidance_update(heading_get_current(),
                                   drive_get_distance_mm(),
@@ -210,9 +215,6 @@ static void control_step(uint32_t dt)
 
         motor_set_output(MOTOR_LEFT,  obstacle_avoidance_get_left_speed());
         motor_set_output(MOTOR_RIGHT, obstacle_avoidance_get_right_speed());
-
-        /* 자이로 각도는 계속 적분해야 하므로 heading 은 갱신해 둔다 */
-        heading_update(dt);
 
         if (obstacle_avoidance_is_running() == false)
         {
@@ -330,6 +332,9 @@ void obstacle_avoidance_test_init(void)
     config.turn_angle_deg       = TEST_TURN_ANGLE_DEG;
 
     obstacle_avoidance_set_config(&config);
+
+    /* 첫 측정을 한 번 돌려 유효한 거리값을 확보한다 */
+    vl53l0x_update_sensor(VL53L0X_FRONT);
 }
 
 /* 장애물 회피 시험 루프를 실행한다. */
