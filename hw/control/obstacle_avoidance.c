@@ -10,14 +10,14 @@
  *
  * 상태 흐름
  *
- *   IDLE -> STOP -> CHECK_SPACE -> FIRST_TURN -> FORWARD
- *                                      ^            |
- *                                      |            v
- *                                      +--- SECOND_TURN -> COMPLETED
+ *   IDLE -> STOP -> CHECK_SPACE -> FIRST_TURN
+ *                                      |
+ *                                      v
+ *               COMPLETED <- SECOND_TURN <- FORWARD
  *
- * FIRST_TURN 은 설정한 각도만큼 돌 때마다 전방을 다시 확인한다.
- * 트이지 않으면 같은 방향으로 한 번 더 돌고, 한계까지 돌아도
- * 트이지 않으면 반대 방향을 훑는다. 그래도 안 되면 FAILED 로 간다.
+ * 시험 애플리케이션에서는 LEFT 방향과 90도를 넘긴다.
+ * 따라서 왼쪽 90도 회전 -> 설정 거리 전진 -> 오른쪽 90도 회전으로
+ * 처음 진행 방향을 복구한다.
  * ------------------------------------------------------------------ */
 
 /* 설정값 기본치 */
@@ -26,10 +26,6 @@
 #define AVOID_DEFAULT_FORWARD_SPEED     90
 #define AVOID_DEFAULT_TURN_SPEED        90
 #define AVOID_DEFAULT_TURN_ANGLE_DEG    90.0f
-
-/* 회전 중 전방이 트였다고 판단할 거리 [mm]
- * 장애물 판단 거리보다 넉넉해야 돌자마자 다시 막히지 않는다. */
-#define AVOID_CLEAR_MARGIN_MM           250
 
 /* 목표 각도에 도달했다고 판단할 오차 범위 [도] */
 #define AVOID_ANGLE_TOLERANCE_DEG       5.0f
@@ -40,11 +36,8 @@
 /* 정지 명령 후 차체가 완전히 멎기를 기다리는 시간 [ms] */
 #define AVOID_SETTLE_TIME_MS            500
 
-/* 회전이 끝나지 않아도 이 시간이 지나면 다음 단계로 넘어간다 [ms] */
+/* 이 시간 안에 회전하지 못하면 안전을 위해 실패 정지한다 [ms] */
 #define AVOID_TURN_TIMEOUT_MS           5000
-
-/* 한쪽으로 이 각도까지 돌려도 트이지 않으면 반대쪽을 시도한다 [도] */
-#define AVOID_TURN_LIMIT_DEG            180.0f
 
 
 static obstacle_avoidance_config_t avoid_config;
@@ -52,9 +45,8 @@ static obstacle_avoidance_config_t avoid_config;
 static avoid_state_t     avoid_state     = AVOID_STATE_IDLE;
 static avoid_direction_t avoid_direction = AVOID_DIRECTION_NONE;
 
-/* 회피를 시작한 시점의 방향과 이동 거리 */
+/* 회피를 시작한 시점의 방향 */
 static float avoid_start_heading_deg = 0.0f;
-static float avoid_start_distance_mm = 0.0f;
 
 /* 지금 맞춰야 할 목표 방향 [도] */
 static float avoid_target_heading_deg = 0.0f;
@@ -66,9 +58,6 @@ static float avoid_forward_start_mm = 0.0f;
 static uint32_t avoid_state_tick = 0;
 static uint32_t avoid_angle_tick = 0;
 static bool     avoid_angle_holding = false;
-
-/* 반대 방향까지 이미 시도했는지 여부 */
-static bool avoid_tried_both = false;
 
 /* 회피 동작이 요구하는 좌우 모터 목표 속도 */
 static int16_t avoid_left_speed  = 0;
@@ -97,10 +86,40 @@ static uint32_t avoid_state_elapsed(void)
     return HAL_GetTick() - avoid_state_tick;
 }
 
-/* 두 각도의 차이를 절댓값으로 돌려주는 내부 함수 */
+/* 각도를 0도 이상 360도 미만으로 정규화한다. */
+static float avoid_normalize_360(float angle_deg)
+{
+    while (angle_deg >= 360.0f)
+    {
+        angle_deg -= 360.0f;
+    }
+    while (angle_deg < 0.0f)
+    {
+        angle_deg += 360.0f;
+    }
+
+    return angle_deg;
+}
+
+/* 각도 오차를 -180도 이상 180도 이하의 최단 회전값으로 바꾼다. */
+static float avoid_normalize_error(float error_deg)
+{
+    while (error_deg > 180.0f)
+    {
+        error_deg -= 360.0f;
+    }
+    while (error_deg < -180.0f)
+    {
+        error_deg += 360.0f;
+    }
+
+    return error_deg;
+}
+
+/* 0/360도 경계를 고려한 두 각도의 최소 차이를 반환한다. */
 static float avoid_angle_diff(float a, float b)
 {
-    float diff = a - b;
+    float diff = avoid_normalize_error(a - b);
 
     if (diff < 0.0f)
     {
@@ -127,7 +146,8 @@ static float avoid_turn_sign(void)
 static void avoid_apply_rotation(float current_heading_deg)
 {
     int16_t speed = (int16_t)avoid_config.turn_speed;
-    float   error = avoid_target_heading_deg - current_heading_deg;
+    float   error = avoid_normalize_error(avoid_target_heading_deg
+                                        - current_heading_deg);
 
     /* 허용 오차 안이면 더 돌 필요가 없다 */
     if ((error <= AVOID_ANGLE_TOLERANCE_DEG) &&
@@ -172,20 +192,7 @@ static bool avoid_angle_reached(float current_heading_deg)
         avoid_angle_holding = false;
     }
 
-    /* 마찰이나 관성으로 끝내 도달하지 못하는 경우를 대비한 시간 제한 */
-    if (avoid_state_elapsed() >= AVOID_TURN_TIMEOUT_MS)
-    {
-        return true;
-    }
-
     return false;
-}
-
-/* 전방이 충분히 트였는지 판단하는 내부 함수 */
-static bool avoid_front_is_clear(uint16_t front_distance_mm)
-{
-    return (front_distance_mm >=
-            (avoid_config.obstacle_distance_mm + AVOID_CLEAR_MARGIN_MM));
 }
 
 
@@ -206,10 +213,8 @@ void obstacle_avoidance_reset(void)
 {
     avoid_direction          = AVOID_DIRECTION_NONE;
     avoid_start_heading_deg  = 0.0f;
-    avoid_start_distance_mm  = 0.0f;
     avoid_target_heading_deg = 0.0f;
     avoid_forward_start_mm   = 0.0f;
-    avoid_tried_both         = false;
 
     avoid_set_output(0, 0);
     avoid_change_state(AVOID_STATE_IDLE);
@@ -262,11 +267,9 @@ bool obstacle_avoidance_start(avoid_direction_t direction,
     }
 
     avoid_direction          = direction;
-    avoid_start_heading_deg  = current_heading_deg;
-    avoid_start_distance_mm  = current_distance_mm;
-    avoid_target_heading_deg = current_heading_deg;
+    avoid_start_heading_deg  = avoid_normalize_360(current_heading_deg);
+    avoid_target_heading_deg = avoid_start_heading_deg;
     avoid_forward_start_mm   = current_distance_mm;
-    avoid_tried_both         = false;
 
     /* 우선 완전히 멈춘 뒤에 판단한다 */
     avoid_set_output(0, 0);
@@ -280,8 +283,6 @@ void obstacle_avoidance_update(float current_heading_deg,
                                float current_distance_mm,
                                uint16_t front_distance_mm)
 {
-    float turned;
-
     switch (avoid_state)
     {
         case AVOID_STATE_IDLE:
@@ -307,9 +308,10 @@ void obstacle_avoidance_update(float current_heading_deg,
                 break;
             }
 
-            /* 정한 방향으로 한 단계 돌 목표를 세운다 */
-            avoid_target_heading_deg =
-                current_heading_deg + (avoid_config.turn_angle_deg * avoid_turn_sign());
+            /* 회피 시작 방향을 기준으로 정확히 왼쪽 90도 목표를 세운다. */
+            avoid_target_heading_deg = avoid_normalize_360(
+                avoid_start_heading_deg
+                + (avoid_config.turn_angle_deg * avoid_turn_sign()));
 
             avoid_change_state(AVOID_STATE_FIRST_TURN);
             break;
@@ -317,53 +319,38 @@ void obstacle_avoidance_update(float current_heading_deg,
         case AVOID_STATE_FIRST_TURN:
             avoid_apply_rotation(current_heading_deg);
 
+            if (avoid_state_elapsed() >= AVOID_TURN_TIMEOUT_MS)
+            {
+                avoid_set_output(0, 0);
+                avoid_change_state(AVOID_STATE_FAILED);
+                break;
+            }
+
             if (avoid_angle_reached(current_heading_deg) == false)
             {
                 break;
             }
 
-            /* 한 단계 돌았으니 전방을 다시 본다 */
-            if (avoid_front_is_clear(front_distance_mm) == true)
-            {
-                avoid_forward_start_mm = current_distance_mm;
-
-                avoid_set_output((int16_t)avoid_config.forward_speed,
-                                 (int16_t)avoid_config.forward_speed);
-                avoid_change_state(AVOID_STATE_FORWARD);
-                break;
-            }
-
-            /* 아직 막혀 있으면 같은 방향으로 한 번 더 돈다 */
-            turned = avoid_angle_diff(current_heading_deg, avoid_start_heading_deg);
-
-            if (turned >= AVOID_TURN_LIMIT_DEG)
-            {
-                if (avoid_tried_both == true)
-                {
-                    avoid_set_output(0, 0);
-                    avoid_change_state(AVOID_STATE_FAILED);
-                    break;
-                }
-
-                /* 한쪽을 다 훑었으므로 반대 방향으로 바꿔서 이어 돈다 */
-                avoid_direction = (avoid_direction == AVOID_DIRECTION_LEFT)
-                                ? AVOID_DIRECTION_RIGHT
-                                : AVOID_DIRECTION_LEFT;
-                avoid_tried_both = true;
-            }
-
-            avoid_target_heading_deg =
-                current_heading_deg + (avoid_config.turn_angle_deg * avoid_turn_sign());
-
-            avoid_change_state(AVOID_STATE_FIRST_TURN);
-            break;
-
-        case AVOID_STATE_FORWARD:
-            /* 빠져나가는 도중에 다시 막히면 처음부터 판단한다 */
+            /* 왼쪽을 향한 뒤에도 바로 앞이 막혀 있으면 진행하지 않는다. */
             if (front_distance_mm <= avoid_config.obstacle_distance_mm)
             {
                 avoid_set_output(0, 0);
-                avoid_change_state(AVOID_STATE_STOP);
+                avoid_change_state(AVOID_STATE_FAILED);
+                break;
+            }
+
+            avoid_forward_start_mm = current_distance_mm;
+            avoid_set_output((int16_t)avoid_config.forward_speed,
+                             (int16_t)avoid_config.forward_speed);
+            avoid_change_state(AVOID_STATE_FORWARD);
+            break;
+
+        case AVOID_STATE_FORWARD:
+            /* 회피 전진 중 다시 막히면 추가 동작 없이 안전 정지한다. */
+            if (front_distance_mm <= avoid_config.obstacle_distance_mm)
+            {
+                avoid_set_output(0, 0);
+                avoid_change_state(AVOID_STATE_FAILED);
                 break;
             }
 
@@ -374,7 +361,7 @@ void obstacle_avoidance_update(float current_heading_deg,
                 (float)avoid_config.bypass_distance_mm)
             {
                 /* 회피를 시작할 때의 방향으로 되돌린다 */
-                avoid_target_heading_deg = avoid_start_heading_deg;
+                avoid_target_heading_deg = avoid_normalize_360(avoid_start_heading_deg);
 
                 avoid_change_state(AVOID_STATE_SECOND_TURN);
             }
@@ -383,6 +370,13 @@ void obstacle_avoidance_update(float current_heading_deg,
         case AVOID_STATE_SECOND_TURN:
             avoid_apply_rotation(current_heading_deg);
 
+            if (avoid_state_elapsed() >= AVOID_TURN_TIMEOUT_MS)
+            {
+                avoid_set_output(0, 0);
+                avoid_change_state(AVOID_STATE_FAILED);
+                break;
+            }
+
             if (avoid_angle_reached(current_heading_deg) == false)
             {
                 break;
@@ -390,13 +384,10 @@ void obstacle_avoidance_update(float current_heading_deg,
 
             avoid_set_output(0, 0);
 
-            /* 되돌린 방향에 또 장애물이 있으면 다시 회피에 들어간다 */
+            /* 원래 방향으로 돌아왔는데 또 막혀 있으면 직진하지 않는다. */
             if (front_distance_mm <= avoid_config.obstacle_distance_mm)
             {
-                avoid_start_heading_deg = current_heading_deg;
-                avoid_tried_both        = false;
-
-                avoid_change_state(AVOID_STATE_STOP);
+                avoid_change_state(AVOID_STATE_FAILED);
                 break;
             }
 

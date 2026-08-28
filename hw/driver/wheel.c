@@ -18,6 +18,11 @@
 /* 직진 주행의 기준 출력 [%] */
 #define WHEEL_DEFAULT_OUTPUT    90
 
+/* 좌우 모터의 시동 임계값 차이를 넘기기 위한 출발 출력과 유지 시간.
+ * 출발할 때만 짧게 100%를 주고, 두 바퀴가 움직인 것을 확인한 뒤 PID로 넘긴다. */
+#define WHEEL_START_OUTPUT      100
+#define WHEEL_START_KICK_MS     200U
+
 /* 기어모터가 실제로 돌기 시작하는 최소 출력 [%]
  * 이 값보다 작으면 소리만 나고 바퀴가 움직이지 않으므로
  * 목표가 0 이 아닐 때는 최소한 이만큼은 넣어준다.
@@ -88,6 +93,8 @@ static bool wheel_enabled = true;
 static bool     wheel_starting = false;
 static bool     wheel_startup_fault = false;
 static uint32_t wheel_start_tick = 0;
+static bool     wheel_start_output_applied = false;
+static int32_t  wheel_start_count[WHEEL_COUNT];
 
 
 /* 실수값을 지정한 범위 안으로 잘라주는 내부 함수 */
@@ -275,6 +282,12 @@ void wheel_reset(void)
     wheel_starting = false;
     wheel_startup_fault = false;
     wheel_start_tick = 0;
+    wheel_start_output_applied = false;
+
+    for (wheel = WHEEL_LEFT; wheel < WHEEL_COUNT; wheel++)
+    {
+        wheel_start_count[wheel] = 0;
+    }
 
     encoder_reset();
 }
@@ -303,17 +316,23 @@ void wheel_update(uint32_t elapsed_time_ms)
         return;
     }
 
-    /* 출발 직후에는 PID가 큰 정지 RPM 오차로 100%를 내지 않게
-     * 양쪽을 기준 출력 90%로 동시에 출발시킨다. */
+    /* 출발 직후에는 좌우 모터의 시동 임계값 차이를 넘기기 위해
+     * 짧게 100%를 동시 출력한 뒤 PID 제어로 전환한다. */
     if (wheel_starting == true)
     {
-        bool left_started  = (encoder_get_count(ENCODER_LEFT) != 0);
-        bool right_started = (encoder_get_count(ENCODER_RIGHT) != 0);
+        bool left_started =
+            (encoder_get_count(ENCODER_LEFT) != wheel_start_count[WHEEL_LEFT]);
+        bool right_started =
+            (encoder_get_count(ENCODER_RIGHT) != wheel_start_count[WHEEL_RIGHT]);
+        bool kick_finished = wheel_start_output_applied
+                          && ((HAL_GetTick() - wheel_start_tick) >= WHEEL_START_KICK_MS);
 
-        if (left_started && right_started)
+        if (left_started && right_started && kick_finished)
         {
-            /* 두 바퀴가 모두 움직이면 다음 계산부터 PID로 전환한다. */
+            /* 100% 시동 시간이 끝나고 두 바퀴의 새 펄스가 확인되면
+             * 다음 계산부터 일반 PID 속도 제어로 전환한다. */
             wheel_starting = false;
+            wheel_start_output_applied = false;
 
             for (wheel = WHEEL_LEFT; wheel < WHEEL_COUNT; wheel++)
             {
@@ -321,10 +340,12 @@ void wheel_update(uint32_t elapsed_time_ms)
                 wheel_state[wheel].prev_error = 0.0f;
             }
         }
-        else if ((HAL_GetTick() - wheel_start_tick) >= WHEEL_STARTUP_TIMEOUT_MS)
+        else if (wheel_start_output_applied
+                 && ((HAL_GetTick() - wheel_start_tick) >= WHEEL_STARTUP_TIMEOUT_MS))
         {
             /* 한쪽이 시작하지 않으면 재시동하지 않고 오류를 고정한다. */
             wheel_starting = false;
+            wheel_start_output_applied = false;
             wheel_startup_fault = true;
             wheel_stop();
             return;
@@ -332,9 +353,17 @@ void wheel_update(uint32_t elapsed_time_ms)
         else
         {
             int16_t left_output = (wheel_state[WHEEL_LEFT].target_rpm >= 0.0f)
-                                ? WHEEL_DEFAULT_OUTPUT : -WHEEL_DEFAULT_OUTPUT;
+                                ? WHEEL_START_OUTPUT : -WHEEL_START_OUTPUT;
             int16_t right_output = (wheel_state[WHEEL_RIGHT].target_rpm >= 0.0f)
-                                 ? WHEEL_DEFAULT_OUTPUT : -WHEEL_DEFAULT_OUTPUT;
+                                 ? WHEEL_START_OUTPUT : -WHEEL_START_OUTPUT;
+
+            /* 첫 100% 출력이 실제로 모터에 들어간 시점부터 시간을 잰다.
+             * 주행 명령 시점부터 재면 첫 wheel_update 대기시간만큼 짧아질 수 있다. */
+            if (wheel_start_output_applied == false)
+            {
+                wheel_start_output_applied = true;
+                wheel_start_tick = HAL_GetTick();
+            }
 
             wheel_state[WHEEL_LEFT].measured_rpm  = wheel_read_rpm(WHEEL_LEFT);
             wheel_state[WHEEL_RIGHT].measured_rpm = wheel_read_rpm(WHEEL_RIGHT);
@@ -405,7 +434,10 @@ void wheel_set_target_rpm_both(float left_rpm, float right_rpm)
     if (was_stopped && (left_rpm != 0.0f) && (right_rpm != 0.0f))
     {
         wheel_starting = true;
-        wheel_start_tick = HAL_GetTick();
+        wheel_start_output_applied = false;
+        wheel_start_tick = 0;
+        wheel_start_count[WHEEL_LEFT]  = encoder_get_count(ENCODER_LEFT);
+        wheel_start_count[WHEEL_RIGHT] = encoder_get_count(ENCODER_RIGHT);
     }
 }
 
@@ -523,6 +555,10 @@ bool wheel_is_reached(wheel_t wheel)
 void wheel_stop(void)
 {
     wheel_t wheel;
+
+    wheel_starting = false;
+    wheel_start_output_applied = false;
+    wheel_start_tick = 0;
 
     for (wheel = WHEEL_LEFT; wheel < WHEEL_COUNT; wheel++)
     {

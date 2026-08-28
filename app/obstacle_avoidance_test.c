@@ -15,8 +15,9 @@
  * 그동안에는 상태 머신이 계산한 좌우 속도를 모터에 직접 넣는다.
  * 회피가 끝나면 다시 drive 로 돌아온다.
  *
- * 좌우 거리 센서가 아직 없으므로 좌우 거리는 같은 값으로 넘긴다.
- * 이 경우 회피 방향은 항상 왼쪽부터 시도한다.
+ * 현재 시험 규칙은 고정되어 있다.
+ * 전방 장애물을 확인하면 왼쪽 90도 -> 설정 거리 전진 -> 오른쪽 90도로
+ * 원래 방향을 복구한 뒤 자이로 직진 제어로 돌아간다.
  *
  * 터미널 설정 : 115200 8N1
  * ------------------------------------------------------------------ */
@@ -38,12 +39,21 @@
 /* 장애물로 판단할 전방 거리 [mm] */
 #define TEST_OBSTACLE_MM        250
 
+/* 장애물이 사라졌다고 판단할 거리 [mm]
+ * 진입값보다 크게 두어 250mm 근처에서 상태가 흔들리는 것을 막는다. */
+#define TEST_OBSTACLE_EXIT_MM   320
+
+/* 장애물/정상 거리로 확정하기 위해 필요한 연속 측정 횟수 */
+#define TEST_SENSOR_CONFIRM_COUNT  3U
+
+/* 이 횟수만큼 연속 측정에 실패하면 차량을 안전 정지한다. */
+#define TEST_SENSOR_FAIL_COUNT     3U
+
 /* 회피 방향으로 전진할 거리 [mm] */
 #define TEST_BYPASS_MM          300
 
-/* 한 번에 회전할 각도 [도]
- * 작게 잡으면 조금씩 돌면서 자주 확인하므로 더 부드럽게 피한다. */
-#define TEST_TURN_ANGLE_DEG     45.0f
+/* 왼쪽으로 회피한 뒤 오른쪽으로 복귀할 각도 [도] */
+#define TEST_TURN_ANGLE_DEG     90.0f
 
 
 extern UART_HandleTypeDef huart2;
@@ -57,6 +67,15 @@ static uint8_t test_speed = DRIVE_SPEED_NORMAL;
 /* 회피 상태 머신이 제어를 잡고 있는지 여부 */
 static bool test_avoiding = false;
 
+/* 거리 센서 필터 상태 */
+static uint16_t filtered_front_mm = VL53L0X_MAX_VALID_MM;
+static uint8_t  obstacle_count    = 0;
+static uint8_t  clear_count       = 0;
+static uint8_t  invalid_count     = 0;
+static uint8_t  valid_count       = 0;
+static bool     obstacle_confirmed = false;
+static bool     distance_sensor_fault = true;
+
 
 /* printf 출력을 UART2(ST-LINK 가상 COM 포트)로 내보낸다. */
 int __io_putchar(int ch)
@@ -65,20 +84,99 @@ int __io_putchar(int ch)
     return ch;
 }
 
-/* 전방 거리를 읽되, 값이 유효하지 않으면 아주 먼 거리로 취급하는 내부 함수
- * 측정 실패를 장애물로 오인해 멈추는 것을 막는다. */
+/* 최근 정상적으로 측정된 전방 거리값을 반환한다. */
 static uint16_t read_front_mm(void)
 {
-    if (vl53l0x_is_ready(VL53L0X_FRONT) == false)
+    return filtered_front_mm;
+}
+
+/* 장애물 판정과 센서 오류 판정에 쓰는 연속 측정 횟수를 초기화한다. */
+static void reset_distance_filter(void)
+{
+    filtered_front_mm    = VL53L0X_MAX_VALID_MM;
+    obstacle_count       = 0;
+    clear_count          = 0;
+    invalid_count        = 0;
+    valid_count          = 0;
+    obstacle_confirmed   = false;
+    distance_sensor_fault = true;
+}
+
+/* 전방 센서를 한 번 읽고 연속 감지·히스테리시스·오류 상태를 갱신한다. */
+static void update_front_sensor(void)
+{
+    bool measurement_ok = vl53l0x_update_sensor(VL53L0X_FRONT);
+    uint16_t range_mm = vl53l0x_get_distance_mm(VL53L0X_FRONT);
+
+    /* ready == false 또는 측정 트랜잭션 실패는 실제 센서 오류로 처리한다.
+     * 0mm도 정상 거리로 사용할 수 없으므로 동일하게 오류 횟수에 포함한다. */
+    if ((vl53l0x_is_ready(VL53L0X_FRONT) == false)
+        || (measurement_ok == false)
+        || (range_mm == 0U))
     {
-        return VL53L0X_MAX_VALID_MM;
-    }
-    if (vl53l0x_is_valid(VL53L0X_FRONT) == false)
-    {
-        return VL53L0X_MAX_VALID_MM;
+        valid_count    = 0;
+        obstacle_count = 0;
+        clear_count    = 0;
+
+        if (invalid_count < TEST_SENSOR_FAIL_COUNT)
+        {
+            invalid_count++;
+        }
+        if (invalid_count >= TEST_SENSOR_FAIL_COUNT)
+        {
+            distance_sensor_fault = true;
+        }
+        return;
     }
 
-    return vl53l0x_get_distance_mm(VL53L0X_FRONT);
+    /* 측정 트랜잭션이 성공했다면 8190mm 같은 범위 초과값도 통신 성공이다.
+     * 범위 초과는 센서 고장이 아니라 가까운 장애물이 없다는 뜻으로 사용한다. */
+    filtered_front_mm = range_mm;
+    invalid_count = 0;
+
+    if (valid_count < TEST_SENSOR_CONFIRM_COUNT)
+    {
+        valid_count++;
+    }
+    if (valid_count >= TEST_SENSOR_CONFIRM_COUNT)
+    {
+        distance_sensor_fault = false;
+    }
+
+    if (filtered_front_mm <= TEST_OBSTACLE_MM)
+    {
+        clear_count = 0;
+
+        if (obstacle_count < TEST_SENSOR_CONFIRM_COUNT)
+        {
+            obstacle_count++;
+        }
+        if (obstacle_count >= TEST_SENSOR_CONFIRM_COUNT)
+        {
+            obstacle_confirmed = true;
+        }
+        return;
+    }
+
+    if ((filtered_front_mm > VL53L0X_MAX_VALID_MM)
+        || (filtered_front_mm >= TEST_OBSTACLE_EXIT_MM))
+    {
+        obstacle_count = 0;
+
+        if (clear_count < TEST_SENSOR_CONFIRM_COUNT)
+        {
+            clear_count++;
+        }
+        if (clear_count >= TEST_SENSOR_CONFIRM_COUNT)
+        {
+            obstacle_confirmed = false;
+        }
+        return;
+    }
+
+    /* 250~319mm 구간에서는 직전 장애물 상태를 유지한다. */
+    obstacle_count = 0;
+    clear_count    = 0;
 }
 
 /* 현재 회피 단계의 이름을 문자열로 돌려주는 내부 함수 */
@@ -129,21 +227,25 @@ static void print_help(void)
 /* 전방 센서 상태를 한 줄로 출력한다. */
 static void print_distance(void)
 {
-    printf("[front] %4u mm   ready:%d  valid:%d\r\n",
+    printf("[front] %4u mm   ready:%d  valid:%d  obstacle:%d  fault:%d\r\n",
            vl53l0x_get_distance_mm(VL53L0X_FRONT),
            vl53l0x_is_ready(VL53L0X_FRONT),
-           vl53l0x_is_valid(VL53L0X_FRONT));
+           vl53l0x_is_valid(VL53L0X_FRONT),
+           obstacle_confirmed,
+           distance_sensor_fault);
 }
 
 /* 주행 중 상태를 한 줄로 출력한다. */
 static void print_status(void)
 {
-    printf("%-5s %s | raw:%4u r:%d v:%d | front:%4u | yaw:%5d | L:%4d(%4d) R:%4d(%4d) | dist:%5d mm\r\n",
+    printf("%-5s %s | raw:%4u r:%d v:%d obs:%d fault:%d | front:%4u | yaw:%5d | L:%4d(%4d) R:%4d(%4d) | dist:%5d mm\r\n",
            state_name(),
            direction_name(),
            vl53l0x_get_distance_mm(VL53L0X_FRONT),
            (int)vl53l0x_is_ready(VL53L0X_FRONT),
            (int)vl53l0x_is_valid(VL53L0X_FRONT),
+           (int)obstacle_confirmed,
+           (int)distance_sensor_fault,
            read_front_mm(),
            (int)heading_get_current(),
            obstacle_avoidance_get_left_speed(),
@@ -156,21 +258,20 @@ static void print_status(void)
 /* 회피 상태 머신에 제어를 넘기는 내부 함수 */
 static void enter_avoidance(void)
 {
-    avoid_direction_t direction;
-    uint16_t          front = read_front_mm();
-
-    /* 좌우 센서가 없으므로 같은 값을 넣어 항상 왼쪽부터 시도하게 한다 */
-    direction = obstacle_avoidance_select_direction(VL53L0X_MAX_VALID_MM,
-                                                    VL53L0X_MAX_VALID_MM);
+    uint16_t front = read_front_mm();
 
     /* drive 가 모터를 잡고 있으면 안 되므로 먼저 놓게 한다 */
     drive_stop();
 
-    obstacle_avoidance_start(direction,
+    /* 이번 시험 규칙은 항상 왼쪽 90도 회피다. */
+    obstacle_avoidance_start(AVOID_DIRECTION_LEFT,
                              heading_get_current(),
                              drive_get_distance_mm());
 
     test_avoiding = true;
+    obstacle_confirmed = false;
+    obstacle_count = 0;
+    clear_count = 0;
 
     printf("\r\n[avoid] start  front:%u mm  dir:%s\r\n", front, direction_name());
 }
@@ -194,6 +295,11 @@ static void leave_avoidance(void)
     /* 다음 회피를 위해 상태 머신을 대기로 되돌린다 */
     obstacle_avoidance_reset();
 
+    /* 회피 완료 직후 이전 장애물 이벤트가 다시 발생하지 않게 초기화한다. */
+    obstacle_confirmed = false;
+    obstacle_count = 0;
+    clear_count = 0;
+
     /* 방향 기준은 그대로 두므로 원래 진행 방향으로 복귀한다 */
     drive_forward(test_speed);
 }
@@ -206,6 +312,18 @@ static void control_step(uint32_t dt)
     if (test_running == false)
     {
         drive_update(dt);
+        return;
+    }
+
+    /* 거리 센서가 연속으로 실패하면 장애물 없음으로 간주하지 않고 정지한다. */
+    if (distance_sensor_fault == true)
+    {
+        printf("\r\n>>> DISTANCE SENSOR FAILED - STOP\r\n");
+
+        test_running  = false;
+        test_avoiding = false;
+        obstacle_avoidance_reset();
+        drive_stop();
         return;
     }
 
@@ -230,7 +348,7 @@ static void control_step(uint32_t dt)
     }
 
     /* 정상 주행 중 전방이 막히면 회피로 넘어간다 */
-    if (front <= TEST_OBSTACLE_MM)
+    if (obstacle_confirmed == true)
     {
         enter_avoidance();
         return;
@@ -246,6 +364,12 @@ static void handle_command(uint8_t ch)
     {
         case 's':
         case 'S':
+            if (distance_sensor_fault == true)
+            {
+                printf("\r\n>>> START BLOCKED - DISTANCE SENSOR NOT READY\r\n");
+                break;
+            }
+
             printf("\r\n>>> START\r\n");
 
             drive_reset_heading();
@@ -323,11 +447,13 @@ static void poll_uart(void)
 void obstacle_avoidance_test_init(void)
 {
     obstacle_avoidance_config_t config;
+    bool sensor_initialized;
+    uint8_t sample;
 
     drive_init();
 
-    vl53l0x_init();
-    vl53l0x_init_all();
+    reset_distance_filter();
+    sensor_initialized = vl53l0x_init_all();
 
     obstacle_avoidance_init();
 
@@ -339,8 +465,14 @@ void obstacle_avoidance_test_init(void)
 
     obstacle_avoidance_set_config(&config);
 
-    /* 첫 측정을 한 번 돌려 유효한 거리값을 확보한다 */
-    vl53l0x_update_sensor(VL53L0X_FRONT);
+    /* 출발 전에 연속 정상값을 확보해 오측정과 초기 불안정값을 걸러낸다. */
+    if (sensor_initialized == true)
+    {
+        for (sample = 0; sample < TEST_SENSOR_CONFIRM_COUNT; sample++)
+        {
+            update_front_sensor();
+        }
+    }
 }
 
 /* 장애물 회피 시험 루프를 실행한다. */
@@ -365,7 +497,7 @@ void obstacle_avoidance_test_run(void)
         if ((now - sensor_tick) >= SENSOR_PERIOD_MS)
         {
             sensor_tick = now;
-            vl53l0x_update_sensor(VL53L0X_FRONT);
+            update_front_sensor();
         }
 
         /* 제어 주기마다 주행과 회피를 갱신한다.
