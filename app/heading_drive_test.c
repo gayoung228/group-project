@@ -23,6 +23,8 @@
  * 터미널 설정: 115200 baud, 8 data bits, no parity, 1 stop bit
  * ------------------------------------------------------------------ */
 
+#ifdef TEST_HEADING_DRIVE
+
 /* 자이로 적분과 방향 제어를 갱신하는 주기 [ms] */
 #define TEST_CONTROL_PERIOD_MS       20U
 
@@ -374,3 +376,5 @@ void heading_drive_test_run(void)
         }
     }
 }
+
+#endif  /* TEST_HEADING_DRIVE */
