@@ -3,3 +3,4 @@ build/
 # IDE settings
 .vscode/
 .settings/
+.mxproject/
