@@ -138,9 +138,12 @@ static void print_distance(void)
 /* 주행 중 상태를 한 줄로 출력한다. */
 static void print_status(void)
 {
-    printf("%-5s %s | front:%4u | yaw:%5d | L:%4d(%4d) R:%4d(%4d) | dist:%5d mm\r\n",
+    printf("%-5s %s | raw:%4u r:%d v:%d | yaw:%5d | front:%4u | yaw:%5d | L:%4d(%4d) R:%4d(%4d) | dist:%5d mm\r\n",
            state_name(),
            direction_name(),
+           vl53l0x_get_distance_mm(VL53L0X_FRONT),
+           (int)vl53l0x_is_ready(VL53L0X_FRONT),
+           (int)vl53l0x_is_valid(VL53L0X_FRONT),
            read_front_mm(),
            (int)heading_get_current(),
            obstacle_avoidance_get_left_speed(),
@@ -187,6 +190,9 @@ static void leave_avoidance(void)
     }
 
     printf("\r\n[avoid] completed\r\n");
+
+    /* 다음 회피를 위해 상태 머신을 대기로 되돌린다 */
+    obstacle_avoidance_reset();
 
     /* 방향 기준은 그대로 두므로 원래 진행 방향으로 복귀한다 */
     drive_forward(test_speed);
