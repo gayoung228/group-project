@@ -3,6 +3,7 @@
 #include "heading_control.h"
 #include "wheel.h"
 #include "motor.h"
+#include "encoder.h"
 
 /* ------------------------------------------------------------------
  * drive.c - 차량 단위 주행 명령
@@ -16,8 +17,7 @@
 /* 실제로 바퀴가 돌기 시작하는 최소 PWM [%] */
 #define DRIVE_DUTY_MIN          80
 
-/* 듀티를 RPM 으로 바꾸기 위한 실측 기준값
- * ★ 개루프 주행으로 측정한 값에 맞춰 반드시 수정할 것 ★ */
+/* 듀티를 RPM 으로 바꾸기 위한 실측 기준값 */
 #define DRIVE_RPM_AT_MIN_DUTY    90.0f   /* 80% 에서 나온 RPM */
 #define DRIVE_RPM_AT_MAX_DUTY   150.0f   /* 100% 에서 나온 RPM */
 
@@ -26,6 +26,15 @@
 
 /* wheel PID 주기 [ms] : 엔코더 분해능 때문에 heading 보다 길어야 한다 */
 #define DRIVE_WHEEL_PERIOD_MS   100
+
+/* ★ encoder.c 의 ENCODER_SLOTS_PER_REV 과 같은 값이어야 한다 ★ */
+#define DRIVE_SLOTS_PER_REV     20
+
+/* 바퀴 지름 [mm] */
+#define DRIVE_WHEEL_DIA_MM      66.0f
+
+#define DRIVE_PI                3.141592f
+
 
 static uint32_t drive_wheel_accum = 0;
 
@@ -78,6 +87,17 @@ static int16_t drive_read_motor_speed(motor_t motor)
         return -(int16_t)speed;
     }
     return 0;
+}
+
+/* 엔코더 누적 카운트를 이동 거리 [mm] 로 바꿔주는 내부 함수 */
+static float drive_count_to_mm(int32_t count)
+{
+    if (count < 0)
+    {
+        count = -count;
+    }
+
+    return ((float)count / (float)DRIVE_SLOTS_PER_REV) * DRIVE_PI * DRIVE_WHEEL_DIA_MM;
 }
 
 
@@ -168,27 +188,31 @@ void drive_backward(uint8_t speed)
     heading_set_base_rpm(-drive_duty_to_rpm(speed));
 }
 
-/* 제자리에서 좌회전한다.
+/* 제자리에서 지정한 각도만큼 회전한다. (좌회전 +, 우회전 -)
  * 기본 속도를 0 으로 두면 방향 보정량만 남아 좌우가 반대로 돌게 된다. */
-void drive_turn_left(uint8_t speed)
+void drive_rotate(float delta_deg)
 {
-    drive_speed = speed;
     drive_active = true;
 
     heading_set_enabled(true);
     heading_set_base_rpm(0.0f);
-    heading_rotate(DRIVE_TURN_STEP_DEG);
+    heading_rotate(delta_deg);
+}
+
+/* 제자리에서 좌회전한다. */
+void drive_turn_left(uint8_t speed)
+{
+    drive_speed = speed;
+
+    drive_rotate(DRIVE_TURN_STEP_DEG);
 }
 
 /* 제자리에서 우회전한다. */
 void drive_turn_right(uint8_t speed)
 {
     drive_speed = speed;
-    drive_active = true;
 
-    heading_set_enabled(true);
-    heading_set_base_rpm(0.0f);
-    heading_rotate(-DRIVE_TURN_STEP_DEG);
+    drive_rotate(-DRIVE_TURN_STEP_DEG);
 }
 
 /* 좌우 바퀴를 모두 멈춘다. 기준 방향은 유지한다. */
@@ -197,6 +221,33 @@ void drive_stop(void)
     drive_active = false;
     heading_set_enabled(false);
     heading_stop();
+}
+
+/* 현재 방향이 목표 방향에 도달했는지 반환 */
+bool drive_is_aligned(void)
+{
+    return heading_is_aligned();
+}
+
+/* 현재 방향 기준을 지금 향한 방향으로 다시 잡는다. */
+void drive_reset_heading(void)
+{
+    heading_reset();
+}
+
+/* 누적 주행 거리 측정을 0으로 초기화 */
+void drive_reset_distance(void)
+{
+    encoder_reset();
+}
+
+/* 좌우 평균 누적 주행 거리를 mm 단위로 반환 */
+float drive_get_distance_mm(void)
+{
+    float left  = drive_count_to_mm(encoder_get_count(ENCODER_LEFT));
+    float right = drive_count_to_mm(encoder_get_count(ENCODER_RIGHT));
+
+    return (left + right) / 2.0f;
 }
 
 /* 현재 설정된 기본 주행 속도를 반환 */
