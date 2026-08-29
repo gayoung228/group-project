@@ -2,6 +2,7 @@
 #include "heading_control.h"
 #include "wheel.h"
 #include "mpu6050.h"
+#include "rover_config.h"
 
 /* ------------------------------------------------------------------
  * heading_control.c - 자이로 기반 방향 유지 제어
@@ -15,10 +16,7 @@
 #define HEADING_CORRECTION_MAX      25.0f
 
 /* 모터 실측 제어 범위를 넘는 좌우 목표가 만들어지지 않게 한다. */
-#define HEADING_WHEEL_RPM_MAX      150.0f
-
-/* 직진 중 이 각도 이상 틀어지면 보정 방향/센서 이상으로 판단한다. */
-#define HEADING_RUNAWAY_LIMIT_DEG   45.0f
+#define HEADING_WHEEL_RPM_MAX      ROVER_DRIVE_RPM_MAX
 
 /* 보정 힘은 높이되 한 번에 튀지 않도록 20ms마다 최대 8RPM씩 바꾼다. */
 #define HEADING_CORRECTION_STEP      8.0f
@@ -76,9 +74,7 @@ static float heading_kd = HEADING_DEFAULT_KD;
 
 /* 방향 제어 사용 여부 */
 static bool heading_enabled = false;
-static bool heading_runaway_fault = false;
 static bool heading_sensor_ready = false;
-static bool heading_runaway_protection = true;
 
 
 /* 실수값을 지정한 범위 안으로 잘라주는 내부 함수 */
@@ -137,6 +133,7 @@ static void heading_apply(void)
 {
     float left_rpm;
     float right_rpm;
+    float base_magnitude;
 
     /* 정지와 제자리 회전은 둘 다 base RPM이 0이다.
      * 회전 명령이 없다면 Yaw 오차가 있어도 모터를 절대 구동하지 않는다. */
@@ -156,8 +153,49 @@ static void heading_apply(void)
         return;
     }
 
-    left_rpm  = heading_base_rpm - heading_correction;
-    right_rpm = heading_base_rpm + heading_correction;
+    if (heading_base_rpm > 0.0f)
+    {
+        /* 직진 보정은 한쪽을 감속하지 않고 반대쪽을 가속한다.
+         * 따라서 마찰 때문에 멈추는 90RPM 아래로 어느 바퀴도 내려가지 않는다. */
+        base_magnitude = heading_clamp(heading_base_rpm,
+                                       ROVER_DRIVE_RPM_MIN,
+                                       HEADING_WHEEL_RPM_MAX);
+        left_rpm = base_magnitude;
+        right_rpm = base_magnitude;
+
+        if (heading_correction > 0.0f)
+        {
+            right_rpm += 2.0f * heading_correction;
+        }
+        else
+        {
+            left_rpm += -2.0f * heading_correction;
+        }
+    }
+    else if (heading_base_rpm < 0.0f)
+    {
+        /* 후진도 같은 원칙으로 한쪽의 절댓값만 높인다. */
+        base_magnitude = heading_clamp(-heading_base_rpm,
+                                       ROVER_DRIVE_RPM_MIN,
+                                       HEADING_WHEEL_RPM_MAX);
+        left_rpm = -base_magnitude;
+        right_rpm = -base_magnitude;
+
+        if (heading_correction > 0.0f)
+        {
+            left_rpm -= 2.0f * heading_correction;
+        }
+        else
+        {
+            right_rpm += 2.0f * heading_correction;
+        }
+    }
+    else
+    {
+        /* 제자리 회전은 좌우가 반대로 돌아야 하므로 기존 방식을 유지한다. */
+        left_rpm  = -heading_correction;
+        right_rpm = heading_correction;
+    }
 
     left_rpm = heading_clamp(left_rpm,
                              -HEADING_WHEEL_RPM_MAX,
@@ -169,6 +207,37 @@ static void heading_apply(void)
     wheel_set_target_rpm_both(left_rpm, right_rpm);
 }
 
+/* MPU6050을 읽고 현재 X/Y/Z 및 목표와의 Yaw 오차만 갱신한다. */
+bool heading_update_measurement(uint32_t elapsed_time_ms)
+{
+    float roll_deg;
+    float pitch_deg;
+    float yaw_deg;
+
+    if (elapsed_time_ms == 0U)
+    {
+        return heading_sensor_ready;
+    }
+
+    if ((mpu6050_update() == false)
+        || (mpu6050_orientation_update(elapsed_time_ms) == false)
+        || (mpu6050_get_orientation(&roll_deg, &pitch_deg, &yaw_deg) == false))
+    {
+        heading_sensor_ready = false;
+        return false;
+    }
+
+    heading_sensor_ready = true;
+    heading_roll_deg    = heading_normalize_error(roll_deg);
+    heading_pitch_deg   = heading_normalize_error(pitch_deg);
+    heading_current_deg = heading_normalize_360(yaw_deg);
+    heading_target_deg  = heading_normalize_360(heading_target_deg);
+    heading_error_deg   = heading_normalize_error(heading_target_deg
+                                                - heading_current_deg);
+
+    return true;
+}
+
 
 /* MPU6050 을 시작하고 방향 제어 상태를 준비한다. */
 bool heading_init(void)
@@ -177,8 +246,6 @@ bool heading_init(void)
     heading_ki      = HEADING_DEFAULT_KI;
     heading_kd      = HEADING_DEFAULT_KD;
     heading_enabled = false;
-    heading_runaway_fault = false;
-    heading_runaway_protection = true;
     heading_sensor_ready = false;
 
     heading_target_deg  = 0.0f;
@@ -212,74 +279,25 @@ void heading_reset(void)
     heading_rotation_active = false;
     heading_rotation_direction = 0.0f;
     heading_rotation_start_tick = 0;
-    heading_runaway_fault = false;
-
     heading_clear_pid();
 }
 
 /* 제어 주기마다 호출한다. 자이로를 읽고 좌우 목표 RPM 을 갱신한다. */
 void heading_update(uint32_t elapsed_time_ms)
 {
-    float roll_deg;
-    float pitch_deg;
-    float yaw_deg;
     float dt_s;
     float derivative;
     float desired_correction;
     float correction_delta;
-    float absolute_error;
 
     if (elapsed_time_ms == 0)
     {
         return;
     }
 
-    /* 센서를 읽고 각속도를 적분해 현재 자세를 갱신한다 */
-    if (mpu6050_update() == false)
+    /* 센서를 읽고 현재 자세 및 Yaw 오차를 먼저 갱신한다. */
+    if (heading_update_measurement(elapsed_time_ms) == false)
     {
-        heading_sensor_ready = false;
-        wheel_stop();
-        return;
-    }
-    if (mpu6050_orientation_update(elapsed_time_ms) == false)
-    {
-        heading_sensor_ready = false;
-        wheel_stop();
-        return;
-    }
-    if (mpu6050_get_orientation(&roll_deg, &pitch_deg, &yaw_deg) == false)
-    {
-        heading_sensor_ready = false;
-        wheel_stop();
-        return;
-    }
-
-    heading_sensor_ready = true;
-
-    heading_roll_deg    = heading_normalize_error(roll_deg);
-    heading_pitch_deg   = heading_normalize_error(pitch_deg);
-    heading_current_deg = heading_normalize_360(yaw_deg);
-    heading_target_deg  = heading_normalize_360(heading_target_deg);
-    heading_error_deg   = heading_normalize_error(heading_target_deg
-                                                - heading_current_deg);
-
-    absolute_error = heading_error_deg;
-    if (absolute_error < 0.0f)
-    {
-        absolute_error = -absolute_error;
-    }
-
-    /* 직진/후진 중 45도 이상 틀어지면 유턴을 시도하지 않고 정지한다. */
-    if (heading_runaway_protection
-        && (heading_base_rpm != 0.0f) &&
-        (absolute_error >= HEADING_RUNAWAY_LIMIT_DEG))
-    {
-        heading_runaway_fault = true;
-        heading_enabled = false;
-        heading_base_rpm = 0.0f;
-        heading_rotation_active = false;
-        heading_rotation_direction = 0.0f;
-        heading_clear_pid();
         wheel_stop();
         return;
     }
@@ -474,23 +492,6 @@ bool heading_is_enabled(void)
 bool heading_is_sensor_ready(void)
 {
     return heading_sensor_ready;
-}
-
-/* 직진 중 Yaw 오차가 안전 한계를 넘었는지 반환한다. */
-bool heading_has_runaway_fault(void)
-{
-    return heading_runaway_fault;
-}
-
-/* 방지턱 위에서 원래 방향을 복구하는 동안만 45도 즉시 정지를 끌 수 있다. */
-void heading_set_runaway_protection(bool enabled)
-{
-    heading_runaway_protection = enabled;
-
-    if (enabled == false)
-    {
-        heading_runaway_fault = false;
-    }
 }
 
 /* 현재 방향이 기준 방향에 충분히 가까운지 반환한다. */

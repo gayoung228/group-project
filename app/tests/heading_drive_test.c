@@ -5,10 +5,11 @@
 #include "wheel.h"
 #include "encoder.h"
 #include "vl53l0x_test.h"
+#include "rover_config.h"
 #include <stdio.h>
 
 /* ------------------------------------------------------------------
- * heading_drive_test.c - 자이로 직진 유지 시험 애플리케이션
+ * app/tests/heading_drive_test.c - 자이로 직진 유지 단독 시험
  *
  * 이 파일은 다음 세 가지 역할만 담당한다.
  *
@@ -35,15 +36,6 @@
 /* 자동으로 정지할 목표 거리 [mm], 0이면 거리 제한을 사용하지 않는다. */
 #define TEST_TARGET_DISTANCE_MM      8000
 
-/* encoder.c의 ENCODER_SLOTS_PER_REV와 반드시 같은 값이어야 한다. */
-#define TEST_ENCODER_SLOTS_PER_REV   20
-
-/* 실제 차량의 바퀴 지름 [mm] */
-#define TEST_WHEEL_DIAMETER_MM       65.0f
-
-#define TEST_PI_VALUE                3.141592f
-
-
 /* 시험 프로그램이 현재 대기 중인지 주행 중인지 나타낸다. */
 typedef enum
 {
@@ -59,18 +51,6 @@ static uint32_t         test_start_tick = 0;
 
 
 /* ------------------------------------------------------------------
- * UART 출력
- * ------------------------------------------------------------------ */
-
-/* printf가 출력한 문자 한 개를 ST-LINK 가상 COM 포트(UART2)로 보낸다. */
-int __io_putchar(int ch)
-{
-    HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, 100);
-    return ch;
-}
-
-
-/* ------------------------------------------------------------------
  * 거리 계산
  * ------------------------------------------------------------------ */
 
@@ -82,9 +62,9 @@ static float test_count_to_mm(int32_t count)
         count = -count;
     }
 
-    return ((float)count / (float)TEST_ENCODER_SLOTS_PER_REV)
-         * TEST_PI_VALUE
-         * TEST_WHEEL_DIAMETER_MM;
+    return ((float)count / (float)ROVER_ENCODER_SLOTS_PER_REV)
+         * ROVER_PI
+         * ROVER_WHEEL_DIAMETER_MM;
 }
 
 /* 좌우 바퀴 이동 거리의 평균을 차량 이동 거리 [mm]로 사용한다. */
@@ -318,13 +298,6 @@ static void test_update_control(void)
     if (wheel_has_startup_fault())
     {
         printf("\r\n>>> WHEEL START FAILED\r\n");
-        test_finish_run();
-        return;
-    }
-
-    if (heading_has_runaway_fault())
-    {
-        printf("\r\n>>> HEADING ERROR: YAW OVER 45 DEG\r\n");
         test_finish_run();
         return;
     }

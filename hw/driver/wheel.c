@@ -2,6 +2,7 @@
 #include "wheel.h"
 #include "motor.h"
 #include "encoder.h"
+#include "rover_config.h"
 
 /* ------------------------------------------------------------------
  * wheel.c - 바퀴 단위 PID 폐루프 속도 제어
@@ -13,11 +14,11 @@
  * ------------------------------------------------------------------ */
 
 /* 모터 출력의 최대값 [%] */
-#define WHEEL_OUTPUT_MAX        100
+#define WHEEL_OUTPUT_MAX        ROVER_MOTOR_MAX_OUTPUT
 
 /* 좌우 모터의 시동 임계값 차이를 넘기기 위한 출발 출력과 유지 시간.
  * 출발할 때만 짧게 100%를 주고, 두 바퀴가 움직인 것을 확인한 뒤 PID로 넘긴다. */
-#define WHEEL_START_OUTPUT      100
+#define WHEEL_START_OUTPUT      ROVER_MOTOR_MAX_OUTPUT
 #define WHEEL_START_KICK_MS     200U
 
 /* 직진 목표가 있는데 한쪽 실제 RPM이 이 값보다 낮은 상태가 5초 지속되면
@@ -32,19 +33,18 @@
  * 이 값보다 작으면 소리만 나고 바퀴가 움직이지 않으므로
  * 목표가 0 이 아닐 때는 최소한 이만큼은 넣어준다.
  * 실측한 기동 듀티에 맞춰 조정할 것. */
-#define WHEEL_MIN_OUTPUT        80
+#define WHEEL_MIN_OUTPUT        ROVER_MOTOR_MIN_OUTPUT
 
 /* 실측 RPM과 PWM 출력의 기준점
  * 90RPM=80%, 120RPM=90%, 150RPM=100%로 선형 변환한다. */
-#define WHEEL_RPM_AT_MIN_OUTPUT  90.0f
-#define WHEEL_RPM_AT_MAX_OUTPUT 150.0f
+#define WHEEL_RPM_AT_MIN_OUTPUT ROVER_DRIVE_RPM_MIN
+#define WHEEL_RPM_AT_MAX_OUTPUT ROVER_DRIVE_RPM_MAX
 
 /* 적분항이 쌓일 수 있는 한계 (적분 포화 방지) */
 #define WHEEL_INTEGRAL_LIMIT    300.0f
 
-/* 목표 도달로 판단할 오차 범위 [RPM]
- * 엔코더 분해능상 RPM 이 30 단위로 끊기므로 그보다 작게 잡으면 안 된다. */
-#define WHEEL_RPM_TOLERANCE     35.0f
+/* 펄스 간격+EMA 측정값에서 목표 도달로 판단할 오차 범위 [RPM] */
+#define WHEEL_RPM_TOLERANCE     15.0f
 
 /* PID 게인 초기값 (실측 후 튜닝할 것) */
 #define WHEEL_DEFAULT_KP        0.08f
@@ -316,8 +316,10 @@ static void wheel_control(wheel_t wheel, float dt_s)
                            + (wheel_ki * state->integral)
                            + (wheel_kd * derivative));
 
+    /* 이 기어모터는 80% 아래에서 멈추므로 목표가 0이 아닌 동안에는
+     * PID가 출력을 낮추더라도 실제 기동 최저 출력 아래로 내리지 않는다. */
     magnitude = wheel_clamp(magnitude,
-                            in_place_rotation ? (float)WHEEL_MIN_OUTPUT : 0.0f,
+                            (float)WHEEL_MIN_OUTPUT,
                             (float)WHEEL_OUTPUT_MAX);
 
     output = direction * magnitude;
@@ -376,10 +378,10 @@ static void wheel_apply_sync(void)
     right_magnitude = (float)wheel_state[WHEEL_RIGHT].output * right_direction;
 
     left_magnitude  = wheel_clamp(left_magnitude - correction,
-                                  0.0f,
+                                  (float)WHEEL_MIN_OUTPUT,
                                   (float)WHEEL_OUTPUT_MAX);
     right_magnitude = wheel_clamp(right_magnitude + correction,
-                                  0.0f,
+                                  (float)WHEEL_MIN_OUTPUT,
                                   (float)WHEEL_OUTPUT_MAX);
 
     wheel_state[WHEEL_LEFT].output  = (int16_t)(left_direction  * left_magnitude);

@@ -18,10 +18,10 @@ bool debug_uart_send_format(
     ...
 );  
 
-void debug_uart_update(void);  // 비동기 UART 송수신 큐와 전송 상태를 갱신
+void debug_uart_update(void);  // 현재 blocking 구현에서는 호환용 빈 함수
 
-bool debug_uart_is_busy(void);  // UART가 현재 데이터를 전송 중인지 반환
+bool debug_uart_is_busy(void);  // UART HAL 송신 상태를 반환
 
-void debug_uart_on_tx_complete(void);  // UART 송신 완료 인터럽트 발생을 드라이버에 전달
+void debug_uart_on_tx_complete(void);  // 향후 비동기 전환을 위한 호환 함수
 
 #endif

@@ -3,22 +3,26 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "rover_config.h"
 
 /* 주행 속도 단계 [PWM %]
  * 80 아래에서는 차가 아예 움직이지 않으므로 이 범위 안에서만 쓴다. */
-#define DRIVE_SPEED_SLOW      80    // 감속 (거친 노면)
-#define DRIVE_SPEED_NORMAL    90    // 기본
-#define DRIVE_SPEED_FAST     100    // 가속 (평탄한 노면)
+#define DRIVE_SPEED_SLOW      ROVER_MOTOR_MIN_OUTPUT
+#define DRIVE_SPEED_NORMAL    ROVER_MOTOR_NORMAL_OUTPUT
+#define DRIVE_SPEED_FAST      ROVER_MOTOR_MAX_OUTPUT
 
 /* 실측으로 정한 제어 가능 RPM 범위 */
-#define DRIVE_RPM_MIN         90.0f
-#define DRIVE_RPM_MAX        150.0f
+#define DRIVE_RPM_MIN         ROVER_DRIVE_RPM_MIN
+#define DRIVE_RPM_MAX         ROVER_DRIVE_RPM_MAX
 
 // 주행 모듈을 초기화하고 MPU6050까지 준비됐는지 반환
 bool drive_init(void);
 
 // 정지 상태에서 MPU6050 초기화와 영점 보정을 다시 시도
 bool drive_retry_heading_init(void);
+
+// 모터 PWM과 좌우 엔코더 입력 캡처를 정지했다가 다시 초기화한다.
+bool drive_retry_motion_hardware(void);
 
 // 모터 주행에 필요한 MPU6050/방향 제어가 준비됐는지 반환
 bool drive_is_ready(void);
@@ -43,6 +47,10 @@ float drive_speed_to_rpm(uint8_t speed);
 
 // 주행 단계값은 유지하면서 방지턱 같은 일시적 목표 RPM을 적용한다.
 void drive_set_forward_target_rpm(float target_rpm);
+
+/* 장애물 회피처럼 좌우 출력을 직접 정해야 할 때도 motor를 우회하지 않고
+ * drive를 통해 -100~100 출력 명령을 적용한다. */
+void drive_set_direct_output(int16_t left_output, int16_t right_output);
 
 // 현재 위치에서 지정한 절대 Yaw 목표로 제자리 회전을 시작한다.
 void drive_recover_heading(float target_heading_deg);
@@ -77,5 +85,8 @@ uint8_t drive_get_speed(void);  // 현재 설정된 기본 주행 속도를 반�
 int16_t drive_get_left_speed(void);  // 현재 왼쪽 바퀴에 적용된 속도를 반환
 
 int16_t drive_get_right_speed(void);  // 현재 오른쪽 바퀴에 적용된 속도를 반환
+
+// 현재 drive가 좌우 직접 출력 모드인지 반환
+bool drive_is_direct_mode(void);
 
 #endif

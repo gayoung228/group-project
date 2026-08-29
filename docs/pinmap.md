@@ -10,7 +10,7 @@
 - DC 기어 모터 2개
 - HC-020K 휠 엔코더 2개
 - MPU6050
-- VL53L0X 3개
+- VL53L0X 정면 센서 1개 사용 중(좌·우 센서 핀은 확장용으로 예약)
 - IR 리모컨 수신기
 - ST-LINK Virtual COM Port
 
@@ -27,11 +27,11 @@
 | 모터 드라이버 활성화 | `MOTOR_STBY` | D3 | PB3 | GPIO Output Push-Pull | TB6612FNG STBY |
 | 왼쪽 엔코더 펄스 | — | A0 | PA0 | TIM5_CH1 Input Capture | 왼쪽 HC-020K OUT |
 | 오른쪽 엔코더 펄스 | — | A1 | PA1 | TIM5_CH2 Input Capture | 오른쪽 HC-020K OUT |
-| I2C Clock | — | D15 | PB8 | I2C1_SCL | MPU6050 및 VL53L0X 3개 SCL |
-| I2C Data | — | D14 | PB9 | I2C1_SDA | MPU6050 및 VL53L0X 3개 SDA |
-| 왼쪽 거리 센서 종료 제어 | `TOF_LEFT_XSHUT` | A2 | PA4 | GPIO Output Open-Drain | 왼쪽 VL53L0X XSHUT |
+| I2C Clock | — | D15 | PB8 | I2C1_SCL | MPU6050 및 VL53L0X SCL |
+| I2C Data | — | D14 | PB9 | I2C1_SDA | MPU6050 및 VL53L0X SDA |
+| 왼쪽 거리 센서 종료 제어 | `TOF_LEFT_XSHUT` | A2 | PA4 | GPIO Output Open-Drain | 확장용 예약 |
 | 정면 거리 센서 종료 제어 | `TOF_FRONT_XSHUT` | D2 | PA10 | GPIO Output Open-Drain | 정면 VL53L0X XSHUT |
-| 오른쪽 거리 센서 종료 제어 | `TOF_RIGHT_XSHUT` | A3 | PB0 | GPIO Output Open-Drain | 오른쪽 VL53L0X XSHUT |
+| 오른쪽 거리 센서 종료 제어 | `TOF_RIGHT_XSHUT` | A3 | PB0 | GPIO Output Open-Drain | 확장용 예약 |
 | IR 리모컨 수신 신호 | — | D10 | PB6 | TIM4_CH1 Input Capture | IR 수신기 OUT |
 | 디버그 UART 송신 | `USART_TX` | D1 | PA2 | USART2_TX | ST-LINK Virtual COM Port |
 | 디버그 UART 수신 | `USART_RX` | D0 | PA3 | USART2_RX | ST-LINK Virtual COM Port |
@@ -125,18 +125,15 @@ HAL_TIM_IC_Start_IT(&htim4, TIM_CHANNEL_1);
 
 ## I2C 센서 연결
 
-MPU6050과 VL53L0X 3개는 하나의 I2C1 버스를 공유한다.
+MPU6050과 정면 VL53L0X는 하나의 I2C1 버스를 공유한다. 좌·우 VL53L0X를
+추가할 때도 같은 두 선에 병렬로 연결하고 XSHUT으로 주소를 나눈다.
 
 ```text
 PB8 / D15 → MPU6050 SCL
-          → VL53L0X LEFT SCL
           → VL53L0X FRONT SCL
-          → VL53L0X RIGHT SCL
 
 PB9 / D14 → MPU6050 SDA
-          → VL53L0X LEFT SDA
           → VL53L0X FRONT SDA
-          → VL53L0X RIGHT SDA
 ```
 
 I2C1 설정:
@@ -159,7 +156,8 @@ PA10 / D2 → VL53L0X FRONT XSHUT
 PB0  / A3 → VL53L0X RIGHT XSHUT
 ```
 
-세 XSHUT 핀의 공통 설정:
+세 XSHUT 핀은 확장을 고려해 CubeMX에 설정되어 있다. 현재는 FRONT만 연결한다.
+공통 설정은 다음과 같다.
 
 ```text
 GPIO Mode        : Output Open-Drain
@@ -168,7 +166,8 @@ Pull-up/down     : No Pull
 Maximum Speed    : Low
 ```
 
-VL53L0X 3개는 전원을 켤 때 기본 I2C 주소가 같으므로 다음 순서로 초기화한다.
+나중에 VL53L0X 3개를 모두 연결하면 전원을 켤 때 기본 I2C 주소가 같으므로
+다음 순서로 초기화한다.
 
 ```text
 모든 XSHUT LOW

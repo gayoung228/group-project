@@ -33,7 +33,7 @@ bool mpu6050_start(void);
 // 현재 자세를 기준(Roll/Pitch/Yaw = 0도)으로 재설정
 void mpu6050_orientation_reset(void);
 
-// 지정한 시간 간격만큼 gyro dps를 적분하여 Roll/Pitch/Yaw를 누적
+// X/Y는 상보 필터, Z는 자이로 적분으로 상대 자세를 갱신
 bool mpu6050_orientation_update(uint32_t elapsed_time_ms);
 
 // 기준 자세 대비 현재 상대 Roll/Pitch/Yaw(degree)를 반환

@@ -2,6 +2,7 @@
 #include "encoder.h"
 #include "motor.h"
 #include "ir_remote.h"
+#include "rover_config.h"
 
 /* ------------------------------------------------------------------
  * 하드웨어 배선 (Pin Map 문서 기준)
@@ -16,15 +17,14 @@
  * 따라서 부호는 motor_get_direction() 으로 판단한다.
  * ------------------------------------------------------------------ */
 
-/* ★ 반드시 실물을 세어서 맞출 것 ★
- * 슬롯 디스크의 구멍 개수. 이 값이 틀리면 RPM 이 통째로 틀어진다. */
-#define ENCODER_SLOTS_PER_REV   20
-
-/* 타이머 1카운트의 시간 [us] */
-#define ENCODER_TICK_US         1.0f
-
 /* 이 시간 동안 펄스가 없으면 정지로 간주한다 [ms] */
 #define ENCODER_TIMEOUT_MS      200
+
+/* 새 측정값을 30%, 이전 필터값을 70% 반영한다. */
+#define ENCODER_RPM_EMA_ALPHA   0.30f
+
+/* 1분을 마이크로초로 표현한 값 */
+#define ENCODER_US_PER_MINUTE   60000000.0f
 
 /* 엔코더 개수 */
 #define ENCODER_COUNT           2
@@ -47,8 +47,13 @@ typedef struct
     int32_t  count;             /* 부호 있는 누적 펄스 수 */
     int32_t  delta_count;       /* 직전 구간의 펄스 변화량 */
     int32_t  last_count;        /* 직전 구간 종료 시점의 누적값 */
-    float    rpm;               /* 현재 회전 속도 */
+    float    rpm;               /* EMA 필터를 적용한 회전 속도 크기 */
     uint32_t last_pulse_tick;   /* 마지막 펄스가 들어온 시각 [ms] */
+    uint32_t last_capture_tick; /* 직전 TIM5 캡처값 [us] */
+    uint32_t pulse_interval_us; /* 최근 두 펄스 사이 시간 [us] */
+    uint32_t pulse_sequence;    /* 새 간격이 생길 때마다 증가하는 번호 */
+    bool     capture_started;   /* 첫 번째 캡처를 받았는지 여부 */
+    bool     rpm_initialized;   /* EMA 첫 값을 받았는지 여부 */
 } encoder_state_t;
 
 
@@ -62,6 +67,7 @@ static const encoder_hw_t encoder_hw[ENCODER_COUNT] =
 /* 인터럽트에서 갱신되므로 volatile 로 선언한다 */
 static volatile encoder_state_t encoder_state[ENCODER_COUNT];
 static bool encoder_ready[ENCODER_COUNT];
+static uint32_t encoder_processed_sequence[ENCODER_COUNT];
 
 
 /* 좌우 엔코더 타이머 또는 인터럽트를 초기화 */
@@ -83,6 +89,21 @@ bool encoder_init(void)
     }
 
     return all_ready;
+}
+
+/* 오류 복구용 엔코더 재시동.
+ * 이미 실행 중인 TIM5 CH1/CH2 인터럽트를 멈춘 뒤 새 측정처럼 다시 시작한다. */
+bool encoder_restart(void)
+{
+    encoder_id_t id;
+
+    for (id = ENCODER_LEFT; id < ENCODER_COUNT; id++)
+    {
+        (void)HAL_TIM_IC_Stop_IT(&htim5, encoder_hw[id].channel);
+        encoder_ready[id] = false;
+    }
+
+    return encoder_init();
 }
 
 /* 선택한 엔코더 입력 캡처가 정상적으로 시작됐는지 반환 */
@@ -109,12 +130,18 @@ void encoder_reset(void)
         encoder_state[id].last_count      = 0;
         encoder_state[id].rpm             = 0.0f;
         encoder_state[id].last_pulse_tick = now;
+        encoder_state[id].last_capture_tick = 0;
+        encoder_state[id].pulse_interval_us = 0;
+        encoder_state[id].pulse_sequence = 0;
+        encoder_state[id].capture_started = false;
+        encoder_state[id].rpm_initialized = false;
+        encoder_processed_sequence[id] = 0;
     }
 }
 
 /* 외부 인터럽트 방식에서 엔코더 펄스 발생을 전달
  * 인터럽트 안에서 호출되므로 최소한의 작업만 한다. */
-void encoder_on_pulse(encoder_id_t encoder)
+void encoder_on_pulse(encoder_id_t encoder, uint32_t capture_tick)
 {
     motor_direction_t direction;
 
@@ -135,18 +162,35 @@ void encoder_on_pulse(encoder_id_t encoder)
         encoder_state[encoder].count++;
     }
 
+    /* uint32_t 뺄셈은 TIM5가 0xFFFFFFFF에서 0으로 돌아가도 올바르게 동작한다. */
+    if (encoder_state[encoder].capture_started == true)
+    {
+        encoder_state[encoder].pulse_interval_us =
+            capture_tick - encoder_state[encoder].last_capture_tick;
+        encoder_state[encoder].pulse_sequence++;
+    }
+    else
+    {
+        /* 첫 펄스만으로는 간격을 알 수 없으므로 기준 시각만 저장한다. */
+        encoder_state[encoder].capture_started = true;
+    }
+
+    encoder_state[encoder].last_capture_tick = capture_tick;
+
     encoder_state[encoder].last_pulse_tick = HAL_GetTick();
 }
 
-/* 측정 시간 동안의 펄스 변화량을 이용해 RPM을 계산
- * 일정 주기(예: 100ms)로 호출해야 한다. */
+/* 최근 두 펄스의 시간 간격으로 RPM을 계산하고 EMA 필터를 적용한다.
+ * 펄스 개수 방식처럼 30RPM 단위로 끊기지 않고 실제 속도를 세밀하게 얻는다. */
 void encoder_update(uint32_t elapsed_time_ms)
 {
     encoder_id_t id;
     int32_t      now_count;
     int32_t      delta;
-    float        revolutions;
-    float        minutes;
+    uint32_t     interval_us;
+    uint32_t     sequence;
+    uint32_t     last_pulse_tick;
+    float        measured_rpm;
 
     if (elapsed_time_ms == 0)
     {
@@ -162,11 +206,48 @@ void encoder_update(uint32_t elapsed_time_ms)
         encoder_state[id].delta_count = delta;
         encoder_state[id].last_count  = now_count;
 
-        /* 펄스 수를 회전수로, 경과 시간을 분으로 바꿔 나눈다 */
-        revolutions = (float)delta / (float)ENCODER_SLOTS_PER_REV;
-        minutes     = (float)elapsed_time_ms / 60000.0f;
+        interval_us = encoder_state[id].pulse_interval_us;
+        sequence = encoder_state[id].pulse_sequence;
+        last_pulse_tick = encoder_state[id].last_pulse_tick;
 
-        encoder_state[id].rpm = revolutions / minutes;
+        /* 새 펄스가 200ms 동안 없으면 정지로 보고 다음 첫 펄스부터 다시 잰다. */
+        if ((HAL_GetTick() - last_pulse_tick) >= ENCODER_TIMEOUT_MS)
+        {
+            encoder_state[id].rpm = 0.0f;
+            encoder_state[id].rpm_initialized = false;
+            encoder_state[id].capture_started = false;
+            encoder_processed_sequence[id] = sequence;
+            continue;
+        }
+
+        /* 같은 펄스 간격을 매 제어 주기마다 중복 필터링하지 않는다. */
+        if ((sequence == encoder_processed_sequence[id]) || (interval_us == 0U))
+        {
+            continue;
+        }
+        encoder_processed_sequence[id] = sequence;
+
+        measured_rpm = ENCODER_US_PER_MINUTE
+                     / ((float)interval_us
+                        * (float)ROVER_ENCODER_SLOTS_PER_REV);
+
+        /* 너무 짧은 노이즈 펄스는 모터가 낼 수 없는 RPM이므로 버린다. */
+        if (measured_rpm > ROVER_ENCODER_MAX_PLAUSIBLE_RPM)
+        {
+            continue;
+        }
+
+        if (encoder_state[id].rpm_initialized == false)
+        {
+            encoder_state[id].rpm = measured_rpm;
+            encoder_state[id].rpm_initialized = true;
+        }
+        else
+        {
+            encoder_state[id].rpm =
+                (encoder_state[id].rpm * (1.0f - ENCODER_RPM_EMA_ALPHA))
+              + (measured_rpm * ENCODER_RPM_EMA_ALPHA);
+        }
     }
 }
 
@@ -235,13 +316,12 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 
     if (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
     {
-        /* 캡처값을 읽어야 다음 캡처가 정상적으로 들어온다 */
-        HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
-        encoder_on_pulse(ENCODER_LEFT);
+        uint32_t captured = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+        encoder_on_pulse(ENCODER_LEFT, captured);
     }
     else if (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_2)
     {
-        HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_2);
-        encoder_on_pulse(ENCODER_RIGHT);
+        uint32_t captured = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_2);
+        encoder_on_pulse(ENCODER_RIGHT, captured);
     }
 }

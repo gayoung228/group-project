@@ -1,6 +1,7 @@
 #include "main.h"
 #include "mpu6050.h"
 #include "stm32f4xx_hal.h"
+#include <math.h>
 
 /* MPU6050 7비트 I2C 주소 (AD0 = GND), HAL은 8비트 주소를 사용하므로 1비트 왼쪽으로 민다 */
 #define MPU6050_I2C_ADDR            (0x68 << 1)
@@ -32,6 +33,15 @@
 /* 전원 인가 직후 자이로 바이어스가 안정될 때까지 보정 전에 기다리는 워밍업 시간 [ms] */
 #define MPU6050_CALIB_WARMUP_TIME   2000
 
+/* X/Y 상보 필터 시간상수. 약 1초에 걸쳐 중력 기준으로 천천히 복귀한다. */
+#define MPU6050_COMPLEMENTARY_TAU_S  1.0f
+
+/* 큰 선형 가속 중에는 중력 방향이 왜곡되므로 가속도 보정을 잠시 끈다. */
+#define MPU6050_ACCEL_MAG_MIN_G      0.75f
+#define MPU6050_ACCEL_MAG_MAX_G      1.25f
+
+#define MPU6050_RAD_TO_DEG           57.2957795f
+
 
 /* CubeMX 가 생성한 I2C 핸들 */
 extern I2C_HandleTypeDef hi2c1;
@@ -59,6 +69,35 @@ static int16_t mpu6050_gyro_raw_z = 0;
 static float mpu6050_roll_deg  = 0.0f;
 static float mpu6050_pitch_deg = 0.0f;
 static float mpu6050_yaw_deg   = 0.0f;
+static float mpu6050_accel_roll_reference_deg = 0.0f;
+static float mpu6050_accel_pitch_reference_deg = 0.0f;
+
+
+/* 각도 차이를 -180~180도 범위로 정리한다. */
+static float mpu6050_normalize_angle(float angle_deg)
+{
+    while (angle_deg > 180.0f)
+    {
+        angle_deg -= 360.0f;
+    }
+    while (angle_deg < -180.0f)
+    {
+        angle_deg += 360.0f;
+    }
+    return angle_deg;
+}
+
+/* 중력 벡터로 Roll/Pitch 절대 기울기를 계산한다. */
+static void mpu6050_get_accel_angles(float *roll_deg, float *pitch_deg)
+{
+    float ax = mpu6050_last_data.accel_x_g;
+    float ay = mpu6050_last_data.accel_y_g;
+    float az = mpu6050_last_data.accel_z_g;
+
+    *roll_deg = atan2f(ay, az) * MPU6050_RAD_TO_DEG;
+    *pitch_deg = atan2f(-ax, sqrtf((ay * ay) + (az * az)))
+               * MPU6050_RAD_TO_DEG;
+}
 
 
 /* 레지스터를 읽는 내부 함수 */
@@ -233,24 +272,40 @@ bool mpu6050_start(void)
 
     HAL_Delay(MPU6050_CALIB_WARMUP_TIME);
 
-    return mpu6050_calibrate_gyro(300);
+    if (mpu6050_calibrate_gyro(300) == false)
+    {
+        return false;
+    }
+
+    /* 보정이 끝난 정지 자세를 X/Y/Z의 0도 기준으로 잡는다. */
+    mpu6050_orientation_reset();
+    return true;
 }
 
 /* 현재 자세를 기준(Roll/Pitch/Yaw = 0도)으로 재설정 */
 void mpu6050_orientation_reset(void)
 {
+    mpu6050_get_accel_angles(&mpu6050_accel_roll_reference_deg,
+                             &mpu6050_accel_pitch_reference_deg);
+
     mpu6050_roll_deg  = 0.0f;
     mpu6050_pitch_deg = 0.0f;
     mpu6050_yaw_deg   = 0.0f;
 }
 
-/* 최근 mpu6050_update() 결과(보정된 gyro dps)를 호출자가 준 dt로 적분하여
- * Roll/Pitch/Yaw를 누적한다.
+/* X/Y는 자이로 적분과 가속도 중력각을 상보 필터로 합치고,
+ * 절대 기준이 없는 Z(Yaw)는 보정된 자이로를 계속 적분한다.
  * I2C를 다시 읽지 않으므로, 호출자가 mpu6050_update()를 먼저 불러야 한다.
  * 적분 시간을 호출자가 정하므로 제어 주기와 항상 일치한다. */
 bool mpu6050_orientation_update(uint32_t elapsed_time_ms)
 {
     float dt_s;
+    float accel_roll_deg;
+    float accel_pitch_deg;
+    float accel_magnitude_g;
+    float alpha;
+    float gyro_roll_deg;
+    float gyro_pitch_deg;
 
     if (!mpu6050_ready || elapsed_time_ms == 0)
     {
@@ -259,8 +314,40 @@ bool mpu6050_orientation_update(uint32_t elapsed_time_ms)
 
     dt_s = elapsed_time_ms / 1000.0f;
 
-    mpu6050_roll_deg  += mpu6050_last_data.gyro_x_dps * dt_s;
-    mpu6050_pitch_deg += mpu6050_last_data.gyro_y_dps * dt_s;
+    gyro_roll_deg = mpu6050_roll_deg
+                  + (mpu6050_last_data.gyro_x_dps * dt_s);
+    gyro_pitch_deg = mpu6050_pitch_deg
+                   + (mpu6050_last_data.gyro_y_dps * dt_s);
+
+    accel_magnitude_g = sqrtf(
+        (mpu6050_last_data.accel_x_g * mpu6050_last_data.accel_x_g)
+      + (mpu6050_last_data.accel_y_g * mpu6050_last_data.accel_y_g)
+      + (mpu6050_last_data.accel_z_g * mpu6050_last_data.accel_z_g));
+
+    if ((accel_magnitude_g >= MPU6050_ACCEL_MAG_MIN_G)
+        && (accel_magnitude_g <= MPU6050_ACCEL_MAG_MAX_G))
+    {
+        mpu6050_get_accel_angles(&accel_roll_deg, &accel_pitch_deg);
+        accel_roll_deg = mpu6050_normalize_angle(
+            accel_roll_deg - mpu6050_accel_roll_reference_deg);
+        accel_pitch_deg = mpu6050_normalize_angle(
+            accel_pitch_deg - mpu6050_accel_pitch_reference_deg);
+
+        alpha = MPU6050_COMPLEMENTARY_TAU_S
+              / (MPU6050_COMPLEMENTARY_TAU_S + dt_s);
+
+        mpu6050_roll_deg = (alpha * gyro_roll_deg)
+                         + ((1.0f - alpha) * accel_roll_deg);
+        mpu6050_pitch_deg = (alpha * gyro_pitch_deg)
+                          + ((1.0f - alpha) * accel_pitch_deg);
+    }
+    else
+    {
+        /* 충격이나 급가속 중에는 가속도각을 믿지 않고 자이로만 사용한다. */
+        mpu6050_roll_deg = gyro_roll_deg;
+        mpu6050_pitch_deg = gyro_pitch_deg;
+    }
+
     mpu6050_yaw_deg   += mpu6050_last_data.gyro_z_dps * dt_s;
 
     return true;

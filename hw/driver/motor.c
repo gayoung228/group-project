@@ -158,6 +158,25 @@ bool motor_init(void)
     return motor_ready;
 }
 
+/* 오류 복구용 모터 재시동.
+ * STBY를 내리고 PWM 채널을 정지한 다음 처음 초기화와 같은 순서로 다시 시작한다. */
+bool motor_restart(void)
+{
+    motor_t motor;
+
+    motor_stop_all();
+    HAL_GPIO_WritePin(MOTOR_STBY_PORT, MOTOR_STBY_PIN, GPIO_PIN_RESET);
+
+    for (motor = MOTOR_LEFT; motor < MOTOR_COUNT; motor++)
+    {
+        (void)HAL_TIM_PWM_Stop(motor_hw[motor].pwm_tim,
+                               motor_hw[motor].pwm_channel);
+    }
+
+    motor_ready = false;
+    return motor_init();
+}
+
 /* 모터 PWM 초기화 결과를 반환한다. */
 bool motor_is_ready(void)
 {

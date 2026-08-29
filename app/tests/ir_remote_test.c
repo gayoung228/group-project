@@ -7,7 +7,7 @@
 #ifdef TEST_IR_REMOTE
 
 /* ------------------------------------------------------------------
- * ir_remote_test.c - NEC IR 리모컨 단독 테스트
+ * app/tests/ir_remote_test.c - NEC IR 리모컨 단독 테스트
  *
  * hw/driver/ir_remote.c가 이미 해석해 둔 Addr/Cmd를 UART로 출력하고,
  * 실측한 "시작/정지" 버튼(Addr=0x00 Cmd=0xC2)이 새 명령으로
@@ -25,15 +25,6 @@
 /* 현재 NEC 디코더에서 실측한 "시작/정지" 버튼 값 */
 #define IR_TEST_START_ADDR   0x00U
 #define IR_TEST_START_CMD    0xC2U
-
-extern UART_HandleTypeDef huart2;
-
-/* printf가 출력한 문자 한 개를 ST-LINK 가상 COM 포트(UART2)로 보낸다. */
-int __io_putchar(int ch)
-{
-    HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, 100);
-    return ch;
-}
 
 /* IR 리모컨 테스트에 필요한 모듈들을 초기화한다. */
 void ir_remote_test_init(void)

@@ -42,20 +42,61 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined library search paths
 )
 
-# 새 모듈 파일이 추가되면 CMake가 자동으로 소스 목록을 다시 확인한다.
-file(GLOB_RECURSE SRC_FILES1 CONFIGURE_DEPENDS "app/*.c")
-file(GLOB_RECURSE SRC_FILES2 CONFIGURE_DEPENDS "hw/*.c")
-# Add sources to executable
+# 기본 펌웨어와 단독 테스트 중 하나만 선택한다.
+# 사용 예: cmake --preset Debug -DROVER_FIRMWARE_MODE=HEADING_TEST
+set(ROVER_FIRMWARE_MODE "ROVER" CACHE STRING
+    "Firmware mode: ROVER, HEADING_TEST, IR_TEST, VL53_TEST")
+set_property(CACHE ROVER_FIRMWARE_MODE PROPERTY STRINGS
+    ROVER HEADING_TEST IR_TEST VL53_TEST)
+
+set(ROVER_COMMON_SOURCES
+    app/ap_main.c
+    hw/control/heading_control.c
+    hw/control/mission_control.c
+    hw/control/obstacle_avoidance.c
+    hw/control/speed_bump_control.c
+    hw/driver/debug_uart.c
+    hw/driver/drive.c
+    hw/driver/encoder.c
+    hw/driver/ir_remote.c
+    hw/driver/motor.c
+    hw/driver/mpu6050.c
+    hw/driver/vl53l0x.c
+    hw/driver/wheel.c
+)
+
+if(ROVER_FIRMWARE_MODE STREQUAL "ROVER")
+    set(ROVER_APP_SOURCE
+        app/rover_app.c
+        app/wheel_calibration.c)
+    set(ROVER_APP_DEFINITIONS APP_ROVER)
+elseif(ROVER_FIRMWARE_MODE STREQUAL "HEADING_TEST")
+    set(ROVER_APP_SOURCE
+        app/tests/heading_drive_test.c
+        app/tests/vl53l0x_test.c)
+    set(ROVER_APP_DEFINITIONS TEST_HEADING_DRIVE TEST_VL53L0X)
+elseif(ROVER_FIRMWARE_MODE STREQUAL "IR_TEST")
+    set(ROVER_APP_SOURCE app/tests/ir_remote_test.c)
+    set(ROVER_APP_DEFINITIONS TEST_IR_REMOTE)
+elseif(ROVER_FIRMWARE_MODE STREQUAL "VL53_TEST")
+    set(ROVER_APP_SOURCE app/tests/vl53l0x_test.c)
+    set(ROVER_APP_DEFINITIONS TEST_VL53L0X)
+else()
+    message(FATAL_ERROR "Unknown ROVER_FIRMWARE_MODE=${ROVER_FIRMWARE_MODE}")
+endif()
+
+message(STATUS "Rover firmware mode: ${ROVER_FIRMWARE_MODE}")
+
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user sources here
-    ${SRC_FILES1}
-    ${SRC_FILES2}
+    ${ROVER_COMMON_SOURCES}
+    ${ROVER_APP_SOURCE}
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
     app
+    app/tests
     hw
     hw/driver
     hw/control
@@ -63,9 +104,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined symbols
-    TEST_OBSTACLE_AVOIDANCE
-    # TEST_IR_REMOTE
+    ${ROVER_APP_DEFINITIONS}
 )
 
 # Remove wrong libob.a library dependency when using cpp files
@@ -74,6 +113,7 @@ list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
 # Add linked libraries
 target_link_libraries(${CMAKE_PROJECT_NAME}
     stm32cubemx
+    m
 
     # Add user defined libraries
 )

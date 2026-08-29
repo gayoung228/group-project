@@ -8,10 +8,8 @@
  * heading.h - 자이로 기반 방향 유지 제어
  *
  * MPU6050 의 Yaw 각도를 읽어 기준 방향과의 오차를 PID 로 계산하고,
- * 좌우 바퀴의 목표 RPM 에 반대 부호로 나눠 실어 방향을 잡는다.
- *
- *   왼쪽  목표 = 기본 속도 - 보정량
- *   오른쪽 목표 = 기본 속도 + 보정량
+ * 좌우 바퀴의 목표 RPM 차이로 방향을 잡는다. 직진 중에는 느린 바퀴를
+ * 기동 최저 RPM 아래로 내리지 않고 반대쪽 바퀴를 더 빠르게 만든다.
  *
  * 기본 속도를 0 으로 두면 보정량만 남아 제자리 회전이 된다.
  * 즉 직진 유지와 회전이 같은 방식으로 처리된다.
@@ -25,6 +23,9 @@ void heading_reset(void);
 
 // 제어 주기마다 호출한다. 자이로를 읽고 좌우 목표 RPM 을 갱신한다.
 void heading_update(uint32_t elapsed_time_ms);
+
+// 직접 출력 주행 중 PID 출력은 건드리지 않고 자세 측정값만 갱신한다.
+bool heading_update_measurement(uint32_t elapsed_time_ms);
 
 // 직진 기본 속도를 RPM 으로 설정한다. (전진 +, 후진 -, 제자리 회전 0)
 void heading_set_base_rpm(float base_rpm);
@@ -65,12 +66,6 @@ bool heading_is_enabled(void);
 
 // MPU6050 초기화와 가장 최근 자세 갱신이 정상인지 반환한다.
 bool heading_is_sensor_ready(void);
-
-// 직진 중 Yaw 오차가 안전 한계를 넘었는지 반환
-bool heading_has_runaway_fault(void);
-
-// 직진 중 45도 초과 안전정지를 켜거나 끈다. 방지턱 복구 중에만 잠시 끈다.
-void heading_set_runaway_protection(bool enabled);
 
 // 현재 방향이 기준 방향에 충분히 가까운지 반환한다.
 bool heading_is_aligned(void);

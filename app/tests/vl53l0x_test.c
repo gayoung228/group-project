@@ -6,7 +6,7 @@
 #ifdef TEST_VL53L0X
 
 /* ============================================================================
- * VL53L0X 단독/통합 테스트 모듈
+ * app/tests의 VL53L0X 단독/통합 테스트 모듈
  *
  * vl53l0x.c의 non-blocking 상태머신(vl53l0x_init_all / vl53l0x_obstacle_update /
  * getter)을 그대로 재사용하며, 이 파일에서는 거리 측정·판정 로직을 다시 만들지

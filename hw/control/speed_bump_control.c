@@ -1,4 +1,5 @@
 #include "speed_bump_control.h"
+#include "rover_config.h"
 
 /* 오르막 이벤트 진입 기준과 평지 근사 범위 [도] */
 #define SPEED_BUMP_CLIMB_DEG          10.0f
@@ -20,7 +21,7 @@
 #define SPEED_BUMP_DESCENT_SCALE      0.90f
 
 /* 프로젝트에서 실측한 모터 제어 최대 목표 RPM */
-#define SPEED_BUMP_MAX_RPM           150.0f
+#define SPEED_BUMP_MAX_RPM           ROVER_DRIVE_RPM_MAX
 
 static speed_bump_state_t bump_state = SPEED_BUMP_STATE_NORMAL;
 static uint32_t bump_trigger_elapsed_ms = 0;

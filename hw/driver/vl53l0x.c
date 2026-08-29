@@ -25,7 +25,6 @@
 #include "main.h"
 #include "vl53l0x.h"
 #include "stm32f4xx_hal.h"
-#include <stdio.h>
 #include <string.h>
 
 /* ----------------------------------------------------------------------------
@@ -1139,60 +1138,3 @@ bool vl53l0x_is_obstacle(vl53l0x_id_t sensor)
 
     return vl53l0x_state[sensor].obstacle;
 }
-
-
-/* ============================================================================
- * [임시 테스트 코드 — 시작] FRONT 센서 배선/거리값/장애물 판정 확인용 USART2 시리얼 테스트.
- *
- * 실물 센서가 1개뿐이라 XSHUT 선을 PA10(TOF_FRONT_XSHUT)에 옮겨 꽂고
- * FRONT(0x31) 위치만 확인하는 용도이다. 다른 위치를 테스트하려면
- * 아래 VL53L0X_FRONT / VL53L0X_FRONT_ADDRESS 를
- * VL53L0X_LEFT/VL53L0X_LEFT_ADDRESS 또는 VL53L0X_RIGHT/VL53L0X_RIGHT_ADDRESS 로
- * 바꾸면 된다.
- *
- * vl53l0x_obstacle_update(200)으로 장애물 판정(threshold = 200mm = 20cm)까지
- * 매 주기 갱신하고, 거리·유효성·장애물 여부를 한 줄로 출력한다.
- *
- * vl53l0x.h의 public API에는 넣지 않았다. 실행하려면 호출부(예: ap_main.c)에서
- *     extern void vl53l0x_serial_test_temp(void);
- * 로 직접 선언한 뒤 한 번 호출하면 된다 (이 함수는 반환하지 않는다).
- *
- * printf는 app/ap_main.c의 __io_putchar()가 이미 USART2(huart2)로 재지정해
- * 두었으므로 이 파일에서 UART를 직접 건드리지 않아도 그대로 출력된다.
- *
- * 삭제 방법 : 이 배너부터 "[임시 테스트 코드 — 끝]" 배너까지 통째로 지우고,
- * 호출부에 추가했던 extern 선언 + 호출 한 줄을 지우면 원래 코드로 복귀한다.
- * ============================================================================ */
-void vl53l0x_serial_test_temp(void)
-{
-    const uint16_t obstacle_threshold_mm = 200; /* 200mm = 20cm */
-
-    vl53l0x_init();
-
-    if (!vl53l0x_init_sensor(VL53L0X_FRONT, VL53L0X_FRONT_ADDRESS))
-    {
-        printf("VL53L0X FRONT INIT FAILED\r\n");
-
-        for (;;)
-        {
-            HAL_Delay(1000);
-        }
-    }
-
-    printf("VL53L0X FRONT READY\r\n");
-
-    for (;;)
-    {
-        vl53l0x_obstacle_update(obstacle_threshold_mm);
-
-        printf("FRONT: %u mm %s OBSTACLE=%s\r\n",
-               (unsigned int)vl53l0x_get_distance_mm(VL53L0X_FRONT),
-               vl53l0x_is_valid(VL53L0X_FRONT)    ? "VALID"   : "INVALID",
-               vl53l0x_is_obstacle(VL53L0X_FRONT) ? "YES"     : "NO");
-
-        HAL_Delay(100);
-    }
-}
-/* ============================================================================
- * [임시 테스트 코드 — 끝]
- * ============================================================================ */

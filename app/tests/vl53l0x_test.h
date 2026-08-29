@@ -1,7 +1,7 @@
 #ifndef VL53L0X_TEST_H
 #define VL53L0X_TEST_H
 
-/* VL53L0X 테스트를 단독으로 실행하는 대표 진입점. vl53l0x_test_update()를
+/* VL53L0X 단독 테스트를 실행하는 대표 진입점. vl53l0x_test_update()를
  * while(1)에서 반복 호출해 LEFT/FRONT/RIGHT 거리·valid·obstacle 상태를
  * USART2로 계속 출력한다. 이 함수는 반환하지 않는다
  * (heading_drive_test 등 다른 상위 루프와 같이 쓰지 않는, 완전히 독립된 진입점).
