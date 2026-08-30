@@ -30,4 +30,7 @@ bool speed_bump_control_take_timeout(void);
 /* Y값이 복귀하지 않아 다운힐 시작 3초 뒤 강제 정상 복귀했는지 반환한다. */
 bool speed_bump_control_take_forced_recovery(void);
 
+/* 방지턱 내리막 뒤 평지 유지까지 정상 완료됐을 때 한 번만 true를 반환한다. */
+bool speed_bump_control_take_completed(void);
+
 #endif

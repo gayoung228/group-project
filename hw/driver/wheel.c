@@ -21,10 +21,13 @@
 #define WHEEL_START_OUTPUT      ROVER_MOTOR_MAX_OUTPUT
 #define WHEEL_START_KICK_MS     200U
 
-/* 직진 목표가 있는데 한쪽 실제 RPM이 이 값보다 낮은 상태가 5초 지속되면
+/* 제자리 회전은 긴 100% 출력이 각도 오버슈트를 만들므로 짧게만 사용한다. */
+#define WHEEL_ROTATION_START_KICK_MS  80U
+
+/* 주행 목표가 있는데 한쪽 실제 RPM이 이 값보다 낮은 상태가 2초 지속되면
  * 모터가 마찰에 걸려 다시 멈춘 것으로 보고 100% 시동 시퀀스를 재실행한다. */
 #define WHEEL_STALL_RPM_THRESHOLD  30.0f
-#define WHEEL_STALL_RESTART_MS      5000U
+#define WHEEL_STALL_RESTART_MS      2000U
 
 /* 재시동 뒤 양쪽 RPM이 이 시간 동안 정상이면 새 정지 사건으로 인정한다. */
 #define WHEEL_STALL_RECOVER_MS      1000U
@@ -35,16 +38,29 @@
  * 실측한 기동 듀티에 맞춰 조정할 것. */
 #define WHEEL_MIN_OUTPUT        ROVER_MOTOR_MIN_OUTPUT
 
-/* 실측 RPM과 PWM 출력의 기준점
- * 90RPM=80%, 120RPM=90%, 150RPM=100%로 선형 변환한다. */
-#define WHEEL_RPM_AT_MIN_OUTPUT ROVER_DRIVE_RPM_MIN
-#define WHEEL_RPM_AT_MAX_OUTPUT ROVER_DRIVE_RPM_MAX
+/* 바퀴 개수 */
+#define WHEEL_COUNT             2
+
+/* 새 배터리 공중 시험의 평균값. 같은 목표 RPM이라도 좌우 모터의 기본 PWM을
+ * 서로 다르게 찾기 위한 feed-forward 보정표다. */
+#define WHEEL_CALIBRATION_POINT_COUNT  5U
+
+static const float wheel_calibration_output[WHEEL_CALIBRATION_POINT_COUNT] =
+{
+    70.0f, 75.0f, 80.0f, 85.0f, 90.0f
+};
+
+static const float wheel_calibration_rpm[WHEEL_COUNT][WHEEL_CALIBRATION_POINT_COUNT] =
+{
+    /* LEFT  */ { 27.5f, 44.5f, 62.5f,  77.0f,  92.5f },
+    /* RIGHT */ { 43.5f, 64.0f, 85.5f, 107.0f, 126.5f }
+};
 
 /* 적분항이 쌓일 수 있는 한계 (적분 포화 방지) */
 #define WHEEL_INTEGRAL_LIMIT    300.0f
 
 /* 펄스 간격+EMA 측정값에서 목표 도달로 판단할 오차 범위 [RPM] */
-#define WHEEL_RPM_TOLERANCE     15.0f
+#define WHEEL_RPM_TOLERANCE      8.0f
 
 /* PID 게인 초기값 (실측 후 튜닝할 것) */
 #define WHEEL_DEFAULT_KP        0.08f
@@ -58,10 +74,6 @@
 
 /* 출발 후 이 시간 안에 양쪽 엔코더 펄스가 모두 들어와야 한다. */
 #define WHEEL_STARTUP_TIMEOUT_MS 500U
-
-/* 바퀴 개수 */
-#define WHEEL_COUNT             2
-
 
 /* 바퀴 한 개가 사용하는 모터와 엔코더 */
 typedef struct
@@ -104,6 +116,7 @@ static bool     wheel_starting = false;
 static bool     wheel_startup_fault = false;
 static uint32_t wheel_start_tick = 0;
 static bool     wheel_start_output_applied = false;
+static uint32_t wheel_start_kick_ms = WHEEL_START_KICK_MS;
 static int32_t  wheel_start_count[WHEEL_COUNT];
 static uint32_t wheel_stall_elapsed_ms = 0;
 static uint32_t wheel_healthy_elapsed_ms = 0;
@@ -126,38 +139,56 @@ static float wheel_clamp(float value, float min, float max)
 }
 
 /* 목표 RPM을 PID가 시작할 기준 출력으로 바꾼다.
- * 90RPM 아래는 내리막 감속처럼 이미 움직이는 상황을 위해 80% 아래도 허용한다.
+ * 좌우 모터의 실측 특성이 다르므로 같은 RPM 목표라도 서로 다른 PWM에서 시작한다.
  * 정지 마찰은 별도의 100% 시동 시퀀스가 담당한다. */
-static float wheel_target_to_base_output(float target_rpm)
+static float wheel_target_to_base_output(wheel_t wheel, float target_rpm)
 {
     float magnitude = target_rpm;
+    uint32_t point;
 
     if (magnitude < 0.0f)
     {
         magnitude = -magnitude;
     }
 
-    if (magnitude <= WHEEL_RPM_AT_MIN_OUTPUT)
+    if (magnitude <= wheel_calibration_rpm[wheel][0])
     {
-        return (float)WHEEL_MIN_OUTPUT
-             * (magnitude / WHEEL_RPM_AT_MIN_OUTPUT);
+        return wheel_calibration_output[0];
     }
 
-    return (float)WHEEL_MIN_OUTPUT
-         + ((magnitude - WHEEL_RPM_AT_MIN_OUTPUT)
-            / (WHEEL_RPM_AT_MAX_OUTPUT - WHEEL_RPM_AT_MIN_OUTPUT))
-           * ((float)WHEEL_OUTPUT_MAX - (float)WHEEL_MIN_OUTPUT);
+    for (point = 1U; point < WHEEL_CALIBRATION_POINT_COUNT; point++)
+    {
+        float upper_rpm = wheel_calibration_rpm[wheel][point];
+
+        if (magnitude <= upper_rpm)
+        {
+            float lower_rpm = wheel_calibration_rpm[wheel][point - 1U];
+            float ratio = (magnitude - lower_rpm) / (upper_rpm - lower_rpm);
+
+            return wheel_calibration_output[point - 1U]
+                 + (ratio * (wheel_calibration_output[point]
+                           - wheel_calibration_output[point - 1U]));
+        }
+    }
+
+    return wheel_calibration_output[WHEEL_CALIBRATION_POINT_COUNT - 1U];
 }
 
 /* 현재 엔코더 위치를 기준으로 100% 시동 시퀀스를 새로 시작한다. */
 static void wheel_begin_startup(void)
 {
     wheel_t wheel;
+    bool in_place_rotation =
+        ((wheel_state[WHEEL_LEFT].target_rpm
+          * wheel_state[WHEEL_RIGHT].target_rpm) < 0.0f);
 
     wheel_starting = true;
     wheel_start_output_applied = false;
     wheel_start_tick = 0;
     wheel_stall_elapsed_ms = 0;
+    wheel_start_kick_ms = in_place_rotation
+                        ? WHEEL_ROTATION_START_KICK_MS
+                        : WHEEL_START_KICK_MS;
     wheel_start_count[WHEEL_LEFT]  = encoder_get_count(ENCODER_LEFT);
     wheel_start_count[WHEEL_RIGHT] = encoder_get_count(ENCODER_RIGHT);
 
@@ -168,27 +199,26 @@ static void wheel_begin_startup(void)
     }
 }
 
-/* 좌우가 같은 방향으로 주행 중인데 한쪽 RPM이 계속 낮은지 감시한다. */
+/* 정지가 아닌 주행 중 한쪽 RPM이 계속 낮은지 감시한다.
+ * 좌우 방향이 반대인 제자리 회전도 저전압 정지 감시 대상에 포함한다. */
 static void wheel_update_stall_watchdog(uint32_t elapsed_time_ms)
 {
     float left_target = wheel_state[WHEEL_LEFT].target_rpm;
     float right_target = wheel_state[WHEEL_RIGHT].target_rpm;
     float left_rpm = encoder_get_rpm(ENCODER_LEFT);
     float right_rpm = encoder_get_rpm(ENCODER_RIGHT);
-    bool same_forward_direction;
-    bool same_reverse_direction;
+    bool both_wheels_commanded;
     bool rpm_too_low;
 
     if (left_rpm < 0.0f)  { left_rpm = -left_rpm; }
     if (right_rpm < 0.0f) { right_rpm = -right_rpm; }
 
-    same_forward_direction = (left_target > 0.0f) && (right_target > 0.0f);
-    same_reverse_direction = (left_target < 0.0f) && (right_target < 0.0f);
+    both_wheels_commanded = (left_target != 0.0f) && (right_target != 0.0f);
     rpm_too_low = (left_rpm < WHEEL_STALL_RPM_THRESHOLD)
                || (right_rpm < WHEEL_STALL_RPM_THRESHOLD);
 
-    /* 정지나 제자리 회전은 재시동 감시 대상이 아니다. */
-    if ((same_forward_direction == false) && (same_reverse_direction == false))
+    /* 실제 정지 명령은 재시동하지 않는다. */
+    if (both_wheels_commanded == false)
     {
         wheel_stall_elapsed_ms = 0;
         wheel_healthy_elapsed_ms = 0;
@@ -219,14 +249,14 @@ static void wheel_update_stall_watchdog(uint32_t elapsed_time_ms)
 
         if (wheel_stall_retry_used == false)
         {
-            /* 첫 번째 5초 정지는 한 번만 자동 복구를 시도한다. */
+            /* 첫 번째 2초 정지는 한 번만 자동 복구를 시도한다. */
             wheel_stall_retry_used = true;
             wheel_stall_restart_count++;
             wheel_begin_startup();
         }
         else
         {
-            /* 재시동 뒤에도 다시 5초간 RPM이 없으면 안전 정지한다. */
+            /* 재시동 뒤에도 다시 2초간 RPM이 없으면 안전 정지한다. */
             wheel_startup_fault = true;
             wheel_stop();
         }
@@ -303,9 +333,9 @@ static void wheel_control(wheel_t wheel, float dt_s)
         ((wheel_state[WHEEL_LEFT].target_rpm
           * wheel_state[WHEEL_RIGHT].target_rpm) < 0.0f);
 
-    base_output = wheel_target_to_base_output(state->target_rpm);
+    base_output = wheel_target_to_base_output(wheel, state->target_rpm);
 
-    /* 제자리 회전은 낮은 출력에서 시작하지 못하므로 최소 80%를 유지한다. */
+    /* 제자리 회전은 낮은 출력에서 시작하지 못하므로 실측 최소 출력을 유지한다. */
     if (in_place_rotation && (base_output < (float)WHEEL_MIN_OUTPUT))
     {
         base_output = (float)WHEEL_MIN_OUTPUT;
@@ -316,7 +346,7 @@ static void wheel_control(wheel_t wheel, float dt_s)
                            + (wheel_ki * state->integral)
                            + (wheel_kd * derivative));
 
-    /* 이 기어모터는 80% 아래에서 멈추므로 목표가 0이 아닌 동안에는
+    /* 이 기어모터는 실측 최저 출력 아래에서 멈출 수 있으므로 목표가 0이 아닌 동안에는
      * PID가 출력을 낮추더라도 실제 기동 최저 출력 아래로 내리지 않는다. */
     magnitude = wheel_clamp(magnitude,
                             (float)WHEEL_MIN_OUTPUT,
@@ -424,6 +454,7 @@ void wheel_reset(void)
     wheel_startup_fault = false;
     wheel_start_tick = 0;
     wheel_start_output_applied = false;
+    wheel_start_kick_ms = WHEEL_START_KICK_MS;
     wheel_stall_elapsed_ms = 0;
     wheel_healthy_elapsed_ms = 0;
     wheel_stall_restart_count = 0;
@@ -475,7 +506,7 @@ void wheel_update(uint32_t elapsed_time_ms)
         bool right_started =
             (encoder_get_count(ENCODER_RIGHT) != wheel_start_count[WHEEL_RIGHT]);
         bool kick_finished = wheel_start_output_applied
-                          && ((HAL_GetTick() - wheel_start_tick) >= WHEEL_START_KICK_MS);
+                          && ((HAL_GetTick() - wheel_start_tick) >= wheel_start_kick_ms);
 
         if (left_started && right_started && kick_finished)
         {
@@ -494,7 +525,7 @@ void wheel_update(uint32_t elapsed_time_ms)
                  && ((HAL_GetTick() - wheel_start_tick) >= WHEEL_STARTUP_TIMEOUT_MS))
         {
             /* 100% 출력을 오래 유지하면 모터가 뜨거워질 수 있으므로 종료한다.
-             * 아직 펄스가 없어도 일반 제어로 넘기고 5초 감시기가 판단한다. */
+             * 아직 펄스가 없어도 일반 제어로 넘기고 2초 감시기가 판단한다. */
             wheel_starting = false;
             wheel_start_output_applied = false;
 
@@ -559,6 +590,17 @@ void wheel_set_target_rpm(wheel_t wheel, float target_rpm)
         return;
     }
 
+    /* 0은 의도한 정지이므로 그대로 둔다. 주행 명령은 배터리가 약해져도
+     * 정지 마찰 구간에 들어가지 않도록 공통 최저 RPM의 절댓값을 보장한다. */
+    if ((target_rpm > 0.0f) && (target_rpm < ROVER_DRIVE_RPM_MIN))
+    {
+        target_rpm = ROVER_DRIVE_RPM_MIN;
+    }
+    else if ((target_rpm < 0.0f) && (target_rpm > -ROVER_DRIVE_RPM_MIN))
+    {
+        target_rpm = -ROVER_DRIVE_RPM_MIN;
+    }
+
     /* 목표의 부호가 바뀌면 이전 오차가 방해가 되므로 누적을 지운다 */
     if ((wheel_state[wheel].target_rpm * target_rpm) < 0.0f)
     {
@@ -569,11 +611,13 @@ void wheel_set_target_rpm(wheel_t wheel, float target_rpm)
     wheel_state[wheel].target_rpm = target_rpm;
 }
 
-/* 좌우 바퀴의 목표 회전 속도를 한 번에 설정한다. */
-void wheel_set_target_rpm_both(float left_rpm, float right_rpm)
+/* 좌우 바퀴 목표를 저장하고 필요하면 정지 마찰 극복용 시동을 시작한다. */
+static void wheel_set_target_rpm_both_internal(float left_rpm,
+                                               float right_rpm,
+                                               bool allow_startup_kick)
 {
     bool was_stopped;
-    bool straight_start;
+    bool motion_start;
 
     if (wheel_startup_fault == true)
     {
@@ -586,19 +630,33 @@ void wheel_set_target_rpm_both(float left_rpm, float right_rpm)
     wheel_set_target_rpm(WHEEL_LEFT,  left_rpm);
     wheel_set_target_rpm(WHEEL_RIGHT, right_rpm);
 
-    /* 양쪽이 같은 방향으로 출발할 때만 100% 시동 시퀀스를 쓴다.
-     * 제자리 방향 복구는 좌우가 반대 방향이므로 시동 시퀀스를 적용하면
-     * 회전 관성이 너무 커질 수 있다. */
-    straight_start = ((left_rpm > 0.0f) && (right_rpm > 0.0f))
-                  || ((left_rpm < 0.0f) && (right_rpm < 0.0f));
+    /* 일반 출발은 정지 마찰을 확실히 넘도록 짧은 100% 시동을 사용한다.
+     * 회전 목표 통과 뒤의 작은 재보정은 allow_startup_kick=false로 부드럽게 시작한다. */
+    motion_start = (left_rpm != 0.0f) && (right_rpm != 0.0f);
 
-    if (was_stopped && straight_start)
+    if (was_stopped && motion_start)
     {
         wheel_stall_restart_count = 0;
         wheel_stall_retry_used = false;
         wheel_healthy_elapsed_ms = 0;
-        wheel_begin_startup();
+
+        if (allow_startup_kick)
+        {
+            wheel_begin_startup();
+        }
     }
+}
+
+/* 일반 출발과 첫 제자리 회전은 정지 마찰 극복용 시동 출력을 사용한다. */
+void wheel_set_target_rpm_both(float left_rpm, float right_rpm)
+{
+    wheel_set_target_rpm_both_internal(left_rpm, right_rpm, true);
+}
+
+/* 회전 목표를 지나친 뒤의 미세 보정은 반복적인 100% 출력 없이 시작한다. */
+void wheel_set_target_rpm_both_no_kick(float left_rpm, float right_rpm)
+{
+    wheel_set_target_rpm_both_internal(left_rpm, right_rpm, false);
 }
 
 /* 출발 시간 내에 양쪽 엔코더가 모두 감지되지 않았는지 반환한다. */
@@ -724,6 +782,7 @@ void wheel_stop(void)
 
     wheel_starting = false;
     wheel_start_output_applied = false;
+    wheel_start_kick_ms = WHEEL_START_KICK_MS;
     wheel_start_tick = 0;
     wheel_stall_elapsed_ms = 0;
     wheel_healthy_elapsed_ms = 0;

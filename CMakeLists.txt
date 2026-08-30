@@ -54,6 +54,7 @@ set(ROVER_COMMON_SOURCES
     hw/control/heading_control.c
     hw/control/mission_control.c
     hw/control/obstacle_avoidance.c
+    hw/control/proximity_monitor.c
     hw/control/speed_bump_control.c
     hw/driver/debug_uart.c
     hw/driver/drive.c

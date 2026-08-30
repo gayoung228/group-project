@@ -31,7 +31,9 @@ static uint32_t bump_descent_elapsed_ms = 0;
 static bool bump_negative_pitch_seen = false;
 static bool bump_timeout_event = false;
 static bool bump_forced_recovery_event = false;
+static bool bump_completed_event = false;
 
+/* 방지턱 속도 배율 결과를 정지 이상, 실측 최대 RPM 이하로 제한한다. */
 static float speed_bump_clamp_rpm(float rpm)
 {
     if (rpm > SPEED_BUMP_MAX_RPM)
@@ -45,13 +47,16 @@ static float speed_bump_clamp_rpm(float rpm)
     return rpm;
 }
 
+/* 방지턱 상태와 이전에 남은 모든 일회성 이벤트를 초기화한다. */
 void speed_bump_control_init(void)
 {
     speed_bump_control_reset();
     bump_timeout_event = false;
     bump_forced_recovery_event = false;
+    bump_completed_event = false;
 }
 
+/* 현재 방지턱 판정만 취소하고 정상 주행 감지 대기로 돌아간다. */
 void speed_bump_control_reset(void)
 {
     bump_state = SPEED_BUMP_STATE_NORMAL;
@@ -60,8 +65,10 @@ void speed_bump_control_reset(void)
     bump_event_elapsed_ms = 0;
     bump_descent_elapsed_ms = 0;
     bump_negative_pitch_seen = false;
+    bump_completed_event = false;
 }
 
+/* 최신 Pitch와 경과 시간으로 오르막·내리막·평지 상태를 갱신한다. */
 void speed_bump_control_update(float pitch_deg, uint32_t elapsed_time_ms)
 {
     if (elapsed_time_ms == 0U)
@@ -152,6 +159,7 @@ void speed_bump_control_update(float pitch_deg, uint32_t elapsed_time_ms)
                 if (bump_level_elapsed_ms >= SPEED_BUMP_LEVEL_HOLD_MS)
                 {
                     speed_bump_control_reset();
+                    bump_completed_event = true;
                 }
             }
             else
@@ -168,11 +176,13 @@ void speed_bump_control_update(float pitch_deg, uint32_t elapsed_time_ms)
     }
 }
 
+/* 현재 방지턱 통과 단계를 반환한다. */
 speed_bump_state_t speed_bump_control_get_state(void)
 {
     return bump_state;
 }
 
+/* 현재 단계의 속도 배율을 기본 RPM에 적용해 안전 범위로 반환한다. */
 float speed_bump_control_get_target_rpm(float normal_rpm)
 {
     switch (bump_state)
@@ -190,6 +200,7 @@ float speed_bump_control_get_target_rpm(float normal_rpm)
     }
 }
 
+/* 전체 상태 제한시간 초과 이벤트를 한 번 소비한다. */
 bool speed_bump_control_take_timeout(void)
 {
     bool occurred = bump_timeout_event;
@@ -197,9 +208,18 @@ bool speed_bump_control_take_timeout(void)
     return occurred;
 }
 
+/* 내리막 제한시간 강제 복귀 이벤트를 한 번 소비한다. */
 bool speed_bump_control_take_forced_recovery(void)
 {
     bool occurred = bump_forced_recovery_event;
     bump_forced_recovery_event = false;
+    return occurred;
+}
+
+/* 정상적인 오르막→내리막→평지 상태 전이가 끝났다는 이벤트를 한 번 소비한다. */
+bool speed_bump_control_take_completed(void)
+{
+    bool occurred = bump_completed_event;
+    bump_completed_event = false;
     return occurred;
 }

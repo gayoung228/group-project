@@ -6,23 +6,22 @@
 #include "heading_control.h"
 #include "ir_remote.h"
 #include "mission_control.h"
+#include "mpu6050.h"
+#include "proximity_monitor.h"
+#include "rover_config.h"
 #include "speed_bump_control.h"
-#include "vl53l0x.h"
 #include "wheel.h"
 #include "wheel_calibration.h"
+#include "vl53l0x.h"
 #include <stdio.h>
 
 /* ------------------------------------------------------------------
  * rover_app.c - 자율주행 로버 통합 애플리케이션
  *
  * 정상 주행 중에는 drive 가 자이로 방향 제어로 직진을 유지한다.
- * 전방에 장애물이 잡히면 회피 상태 머신에 제어를 넘기고,
- * 그동안에는 상태 머신이 계산한 좌우 속도를 모터에 직접 넣는다.
- * 회피가 끝나면 다시 drive 로 돌아온다.
- *
- * 현재 시험 규칙은 고정되어 있다.
- * 전방 장애물을 확인하면 왼쪽 90도 -> 설정 거리 전진 -> 오른쪽 90도로
- * 원래 방향을 복구한 뒤 자이로 직진 제어로 돌아간다.
+ * 3방향 거리센서가 위험도·회피 방향·장애물 끝을 판단하고, 회피 상태
+ * 머신이 기본 RPM과 목표 Yaw를 계산한다. drive는 Yaw 오차를 좌우 목표
+ * RPM 차이로 바꾸고 wheel PID가 실제 바퀴 속도를 만든다.
  *
  * 터미널 설정 : 115200 8N1
  * ------------------------------------------------------------------ */
@@ -41,36 +40,21 @@
 /* 제어 주기가 크게 밀렸을 때 적분에 넣을 최대 시간 [ms] */
 #define CONTROL_DT_LIMIT_MS     100
 
-/* 장애물로 판단할 전방 거리 [mm] */
-#define ROVER_OBSTACLE_MM        250
-
-/* 장애물이 사라졌다고 판단할 거리 [mm]
- * 진입값보다 크게 두어 250mm 근처에서 상태가 흔들리는 것을 막는다. */
-#define ROVER_OBSTACLE_EXIT_MM   320
-
-/* 장애물/정상 거리로 확정하기 위해 필요한 연속 측정 횟수 */
-#define ROVER_SENSOR_CONFIRM_COUNT  3U
-
-/* 이 횟수만큼 연속 측정에 실패하면 차량을 안전 정지한다. */
-#define ROVER_SENSOR_FAIL_COUNT     3U
-
 /* 시작 안내를 띄우기 전에 거리 센서 정상값을 기다리는 최대 시간 [ms] */
-#define ROVER_SENSOR_STARTUP_TIMEOUT_MS  1500U
+#define ROVER_SENSOR_STARTUP_TIMEOUT_MS  2500U
 
 /* 거리센서 오류 상태에서 이 시간 안에 S를 세 번 누르면 센서 복구를 시도한다. */
 #define ROVER_RECOVERY_PRESS_WINDOW_MS   5000U
 #define ROVER_RECOVERY_PRESS_COUNT       3U
 #define ROVER_RECOVERY_MAX_ATTEMPTS      3U
 
-/* 회피 방향으로 전진할 거리 [mm] */
-#define ROVER_BYPASS_MM          500
-
-/* 왼쪽으로 회피한 뒤 오른쪽으로 복귀할 각도 [도] */
-#define ROVER_TURN_ANGLE_DEG     90.0f
+/* 자이로 기준 초기화 버튼을 빠르게 세 번 누를 때 거리센서를 재초기화한다. */
+#define ROVER_YAW_RESET_TRIPLE_WINDOW_MS 2000U
+#define ROVER_YAW_RESET_TRIPLE_COUNT        3U
 
 /* 방지턱에서 진행 방향이 크게 틀어졌을 때의 Z축(Yaw) 복구 조건 */
 #define BUMP_YAW_TRIGGER_DEG       30.0f
-#define BUMP_YAW_DONE_DEG           5.0f
+#define BUMP_YAW_DONE_DEG          ROVER_HEADING_ROTATION_TOLERANCE_DEG
 #define BUMP_YAW_PAUSE_MS         300U
 #define BUMP_YAW_HOLD_MS          300U
 #define BUMP_YAW_TIMEOUT_MS      6000U
@@ -91,22 +75,17 @@ extern UART_HandleTypeDef huart2;
 /* 정상 주행 속도 [PWM %] */
 static uint8_t rover_speed = DRIVE_SPEED_NORMAL;
 
-/* 거리 센서 필터 상태 */
-static uint16_t filtered_front_mm = VL53L0X_MAX_VALID_MM;
-static uint8_t  obstacle_count    = 0;
-static uint8_t  clear_count       = 0;
-static uint8_t  invalid_count     = 0;
-static uint8_t  valid_count       = 0;
-static bool     obstacle_confirmed = false;
-static bool     distance_sensor_fault = true;
+/* proximity_monitor가 갱신한 세 센서의 읽기 전용 최신 상태 */
+static proximity_snapshot_t distance_snapshot;
 
-/* 사용자가 S 버튼 세 번으로 요청하는 거리센서 수동 복구 상태 */
+/* START 오류 복구 또는 Yaw 버튼 빠른 3회로 요청하는 거리센서 수동 복구 상태 */
 static uint8_t  blocked_start_count = 0;
 static uint32_t blocked_start_first_tick = 0;
 static uint8_t  distance_recovery_attempts = 0;
 static bool     distance_recovery_in_progress = false;
+static uint8_t  yaw_reset_press_count = 0;
+static uint32_t yaw_reset_first_tick = 0;
 static uint32_t last_wheel_stall_restart_count = 0;
-static uint32_t last_avoid_stall_restart_count = 0;
 
 typedef enum
 {
@@ -136,152 +115,89 @@ static bool fault_heading_reference_set = false;
 static bool fault_recovery_failed = false;
 
 
-/* 최근 정상적으로 측정된 전방 거리값을 반환한다. */
+/* 최근 필터링된 정면 거리값을 반환한다. */
 static uint16_t read_front_mm(void)
 {
-    return filtered_front_mm;
+    return distance_snapshot.front.distance_mm;
 }
 
-/* 장애물 판정과 센서 오류 판정에 쓰는 연속 측정 횟수를 초기화한다. */
-static void reset_distance_filter(void)
+/* 최근 필터링된 왼쪽 45도 거리값을 반환한다. */
+static uint16_t read_left_mm(void)
 {
-    filtered_front_mm    = VL53L0X_MAX_VALID_MM;
-    obstacle_count       = 0;
-    clear_count          = 0;
-    invalid_count        = 0;
-    valid_count          = 0;
-    obstacle_confirmed   = false;
-    distance_sensor_fault = true;
+    return distance_snapshot.left.distance_mm;
 }
 
-/* 실제 I2C 실패 또는 0mm 결과가 발생했을 때만 오류 횟수를 올린다. */
-static void record_distance_sensor_failure(void)
+/* 최근 필터링된 오른쪽 45도 거리값을 반환한다. */
+static uint16_t read_right_mm(void)
 {
-    valid_count    = 0;
-    obstacle_count = 0;
-    clear_count    = 0;
-
-    if (invalid_count < ROVER_SENSOR_FAIL_COUNT)
-    {
-        invalid_count++;
-    }
-    if (invalid_count >= ROVER_SENSOR_FAIL_COUNT)
-    {
-        distance_sensor_fault = true;
-    }
+    return distance_snapshot.right.distance_mm;
 }
 
-/* 전방 센서를 한 번 읽고 연속 감지·히스테리시스·오류 상태를 갱신한다. */
-static void update_front_sensor(void)
+/* 세 센서의 non-blocking 측정을 진행하고 같은 시점의 스냅샷을 갱신한다. */
+static void update_distance_sensors(void)
 {
-    bool step_ok = vl53l0x_update_sensor(VL53L0X_FRONT);
-    bool measurement_error;
-    bool measurement_new;
-    uint16_t range_mm;
-
-    /* 센서가 초기화되지 않았다면 상태머신 자체를 진행할 수 없다. */
-    if ((vl53l0x_is_ready(VL53L0X_FRONT) == false)
-        || (step_ok == false))
-    {
-        record_distance_sensor_failure();
-        return;
-    }
-
-    /* non-blocking 드라이버는 측정 중간 단계에서도 즉시 반환한다.
-     * 새 결과/오류 이벤트가 없는 호출은 연속 측정 횟수에 포함하지 않는다. */
-    measurement_error = vl53l0x_take_measurement_error(VL53L0X_FRONT);
-    measurement_new   = vl53l0x_take_new_measurement(VL53L0X_FRONT);
-
-    if (measurement_error == true)
-    {
-        record_distance_sensor_failure();
-        return;
-    }
-    if (measurement_new == false)
-    {
-        return;
-    }
-
-    range_mm = vl53l0x_get_distance_mm(VL53L0X_FRONT);
-
-    /* 0mm는 정상 거리로 사용할 수 없으므로 실제 측정 실패에 포함한다. */
-    if (range_mm == 0U)
-    {
-        record_distance_sensor_failure();
-        return;
-    }
-
-    /* 새 거리 결과를 정상적으로 읽었다면 8190mm 같은 범위 초과값도 통신 성공이다.
-     * 범위 초과는 센서 고장이 아니라 가까운 장애물이 없다는 뜻으로 사용한다. */
-    filtered_front_mm = range_mm;
-    invalid_count = 0;
-
-    if (valid_count < ROVER_SENSOR_CONFIRM_COUNT)
-    {
-        valid_count++;
-    }
-    if (valid_count >= ROVER_SENSOR_CONFIRM_COUNT)
-    {
-        distance_sensor_fault = false;
-    }
-
-    if (filtered_front_mm <= ROVER_OBSTACLE_MM)
-    {
-        clear_count = 0;
-
-        if (obstacle_count < ROVER_SENSOR_CONFIRM_COUNT)
-        {
-            obstacle_count++;
-        }
-        if (obstacle_count >= ROVER_SENSOR_CONFIRM_COUNT)
-        {
-            obstacle_confirmed = true;
-        }
-        return;
-    }
-
-    if ((filtered_front_mm > VL53L0X_MAX_VALID_MM)
-        || (filtered_front_mm >= ROVER_OBSTACLE_EXIT_MM))
-    {
-        obstacle_count = 0;
-
-        if (clear_count < ROVER_SENSOR_CONFIRM_COUNT)
-        {
-            clear_count++;
-        }
-        if (clear_count >= ROVER_SENSOR_CONFIRM_COUNT)
-        {
-            obstacle_confirmed = false;
-        }
-        return;
-    }
-
-    /* 250~319mm 구간에서는 직전 장애물 상태를 유지한다. */
-    obstacle_count = 0;
-    clear_count    = 0;
+    proximity_monitor_update();
+    proximity_monitor_get_snapshot(&distance_snapshot);
 }
 
-/* non-blocking 측정 상태머신을 반복 실행하며 정상 결과 3회를 기다린다. */
+/* 부팅·복구 때 세 센서 모두 정상 결과 3회를 만들 때까지 기다린다. */
 static bool wait_for_distance_sensor(uint32_t timeout_ms)
 {
-    uint32_t start_tick = HAL_GetTick();
+    bool ready = proximity_monitor_wait_until_ready(timeout_ms);
+    proximity_monitor_get_snapshot(&distance_snapshot);
+    return ready;
+}
 
-    while ((distance_sensor_fault == true)
-           && ((HAL_GetTick() - start_tick) < timeout_ms))
+/* 거리센서 enum을 초기화 오류 로그에서 읽기 쉬운 이름으로 바꾼다. */
+static const char *distance_sensor_name(vl53l0x_id_t sensor)
+{
+    if (sensor == VL53L0X_LEFT)  { return "LEFT"; }
+    if (sensor == VL53L0X_FRONT) { return "FRONT"; }
+    if (sensor == VL53L0X_RIGHT) { return "RIGHT"; }
+    return "BUS";
+}
+
+/* MPU6050이 세 번의 재시도 뒤에도 실패했을 때 실제 HAL 상태를 출력한다. */
+static void print_mpu6050_init_error(void)
+{
+    printf("[ERROR][MPU6050] stage=%s WHO_AM_I=0x%02X "
+           "HAL=%lu I2C_ERR=0x%08lX I2C_STATE=0x%08lX\r\n",
+           mpu6050_get_last_error_stage(),
+           mpu6050_get_last_who_am_i(),
+           (unsigned long)mpu6050_get_last_hal_status(),
+           (unsigned long)mpu6050_get_last_i2c_error(),
+           (unsigned long)mpu6050_get_last_i2c_state());
+}
+
+/* 주소 할당 실패와 주소 할당 후 측정 준비 실패를 구분해서 출력한다. */
+static void print_distance_init_error(bool address_initialized)
+{
+    if (address_initialized == false)
     {
-        update_front_sensor();
-        HAL_Delay(5);
+        printf("[ERROR][VL53L0X] sensor=%s stage=%s attempt=%u "
+               "HAL=%lu I2C_ERR=0x%08lX I2C_STATE=0x%08lX\r\n",
+               distance_sensor_name(vl53l0x_get_last_init_sensor()),
+               vl53l0x_get_last_init_stage(),
+               vl53l0x_get_last_init_attempt(),
+               (unsigned long)vl53l0x_get_last_hal_status(),
+               (unsigned long)vl53l0x_get_last_i2c_error(),
+               (unsigned long)vl53l0x_get_last_i2c_state());
+        return;
     }
 
-    return (distance_sensor_fault == false);
+    printf("[ERROR][VL53L0X] measurement timeout "
+           "ready L/F/R=%u/%u/%u healthy L/F/R=%u/%u/%u\r\n",
+           distance_snapshot.left.ready ? 1U : 0U,
+           distance_snapshot.front.ready ? 1U : 0U,
+           distance_snapshot.right.ready ? 1U : 0U,
+           distance_snapshot.left.healthy ? 1U : 0U,
+           distance_snapshot.front.healthy ? 1U : 0U,
+           distance_snapshot.right.healthy ? 1U : 0U);
 }
 
 /* 주행 로그에서 현재 동작을 한눈에 볼 수 있는 이름을 만든다. */
 static const char *state_name(void)
 {
-    static char turn_name[24];
-    uint8_t step;
-
     if (mission_control_is_avoiding() == false)
     {
         if (bump_yaw_state == BUMP_YAW_PAUSE)
@@ -303,29 +219,7 @@ static const char *state_name(void)
         }
     }
 
-    switch (obstacle_avoidance_get_state())
-    {
-        case AVOID_STATE_STOP:
-        case AVOID_STATE_CHECK_SPACE:
-            return "OBSTACLE-STOP";
-
-        case AVOID_STATE_FIRST_TURN:
-            step = obstacle_avoidance_get_turn_step();
-            snprintf(turn_name, sizeof(turn_name), "TURN-LEFT %u/3", step);
-            return turn_name;
-
-        case AVOID_STATE_FORWARD:
-            return "BYPASS-FORWARD";
-
-        case AVOID_STATE_SECOND_TURN:
-            step = obstacle_avoidance_get_turn_step();
-            snprintf(turn_name, sizeof(turn_name), "TURN-RIGHT %u/3", step);
-            return turn_name;
-
-        case AVOID_STATE_COMPLETED: return "AVOID-DONE";
-        case AVOID_STATE_FAILED:    return "AVOID-FAILED";
-        default:                    return "NORMAL";
-    }
+    return obstacle_avoidance_state_name(obstacle_avoidance_get_state());
 }
 
 /* 실수 각도의 절댓값을 구한다. */
@@ -484,9 +378,12 @@ static void update_bump_yaw_recovery(uint32_t dt)
         else if ((now - bump_yaw_hold_tick) >= BUMP_YAW_HOLD_MS)
         {
             drive_stop();
-            speed_bump_control_reset();
             reset_bump_yaw_recovery();
-            drive_forward(rover_speed);
+            /* 방지턱 상태를 지우지 않아 내려막·평지 완료 판정과 시연 종료가
+             * Yaw 복구 뒤에도 이어지게 한다. */
+            drive_set_forward_target_rpm(
+                speed_bump_control_get_target_rpm(
+                    drive_speed_to_rpm(rover_speed)));
             mission_control_resume_driving();
 
             printf("[RECOVERY][BUMP] Z returned to 0 -> normal drive\r\n");
@@ -529,6 +426,7 @@ static void update_speed_bump_control(uint32_t dt)
     float target_rpm;
     bool timed_out;
     bool forced_recovery;
+    bool completed;
 
     if (heading_get_pose(&pose_x, &pose_y, &pose_z) == false)
     {
@@ -539,16 +437,19 @@ static void update_speed_bump_control(uint32_t dt)
     current_state = speed_bump_control_get_state();
     timed_out = speed_bump_control_take_timeout();
     forced_recovery = speed_bump_control_take_forced_recovery();
+    completed = speed_bump_control_take_completed();
 
-    if (current_state == previous_state)
+    if ((current_state == previous_state)
+        && !timed_out
+        && !forced_recovery
+        && !completed)
     {
         return;
     }
 
-    target_rpm = apply_speed_bump_target();
-
     if (forced_recovery == true)
     {
+        target_rpm = apply_speed_bump_target();
         printf("\r\n[EVENT][BUMP] Downhill 3 s elapsed -> forced normal drive %d RPM\r\n",
                (int)target_rpm);
         return;
@@ -556,10 +457,21 @@ static void update_speed_bump_control(uint32_t dt)
 
     if (timed_out == true)
     {
+        target_rpm = apply_speed_bump_target();
         printf("\r\n[WARNING][BUMP] State timeout -> normal drive (%d RPM)\r\n",
                (int)target_rpm);
         return;
     }
+
+    if (completed)
+    {
+        target_rpm = apply_speed_bump_target();
+        printf("\r\n[EVENT][BUMP] Passage completed -> normal drive %d RPM\r\n",
+               (int)target_rpm);
+        return;
+    }
+
+    target_rpm = apply_speed_bump_target();
 
     switch (current_state)
     {
@@ -589,74 +501,38 @@ static void update_speed_bump_control(uint32_t dt)
     }
 }
 
-/* 회피 모듈의 내부 속도 명령을 로그용 목표 RPM으로 바꾼다. */
-static float avoidance_target_rpm(int16_t speed)
-{
-    float rpm;
-
-    if (speed == 0)
-    {
-        return 0.0f;
-    }
-
-    rpm = drive_speed_to_rpm((uint8_t)((speed < 0) ? -speed : speed));
-    return (speed < 0) ? -rpm : rpm;
-}
-
-/* 회피 중 직접 구동되는 모터의 실제 RPM에 회전 방향 부호를 붙인다. */
-static float avoidance_actual_rpm(int16_t commanded_output,
-                                  encoder_id_t encoder)
-{
-    float rpm = encoder_get_rpm(encoder);
-
-    if (rpm < 0.0f)
-    {
-        rpm = -rpm;
-    }
-
-    if (commanded_output < 0)
-    {
-        return -rpm;
-    }
-    if (commanded_output > 0)
-    {
-        return rpm;
-    }
-
-    return 0.0f;
-}
-
 /* 사용할 수 있는 명령을 안내한다. */
 static void print_help(void)
 {
     printf("\r\n=========================================\r\n");
-    printf(" Autonomous Rover (front sensor)\r\n");
+    printf(" Autonomous Rover (3-direction sensors)\r\n");
     printf("=========================================\r\n");
     printf("  s : start driving\r\n");
     printf("  x : stop\r\n");
-    printf("  z : reset heading reference\r\n");
+    printf("  z : reset heading reference (3x quickly: reset distance sensors)\r\n");
     printf("  1 : slow   (%d RPM)\r\n",
            (int)drive_speed_to_rpm(DRIVE_SPEED_SLOW));
     printf("  2 : normal (%d RPM)\r\n",
            (int)drive_speed_to_rpm(DRIVE_SPEED_NORMAL));
     printf("  3 : fast   (%d RPM)\r\n",
            (int)drive_speed_to_rpm(DRIVE_SPEED_FAST));
-    printf("  d : front distance only\r\n");
+    printf("  d : left/front/right distance\r\n");
     printf("  c : wheel-lift PWM/RPM calibration (press twice)\r\n");
     printf("  h : help\r\n");
     printf("-----------------------------------------\r\n");
 }
 
-/* 전방 센서 상태를 한 줄로 출력한다. */
+/* LEFT/FRONT/RIGHT 센서 상태를 한 줄로 출력한다. */
 static void print_distance(void)
 {
-    if (distance_sensor_fault == true)
+    if (distance_snapshot.all_healthy == false)
     {
-        printf("[ERROR][DISTANCE] Front distance is unavailable\r\n");
+        printf("[ERROR][DISTANCE] One or more sensors are unavailable\r\n");
         return;
     }
 
-    printf("[DISTANCE] Front: %u mm\r\n", read_front_mm());
+    printf("[DISTANCE] L:%u F:%u R:%u mm\r\n",
+           read_left_mm(), read_front_mm(), read_right_mm());
 }
 
 /* 주행 중 상태를 한 줄로 출력한다. */
@@ -674,33 +550,20 @@ static void print_status(void)
 
     (void)heading_get_pose(&pose_x, &pose_y, &pose_z);
 
-    if (mission_control_is_avoiding() == true)
-    {
-        target_left = avoidance_target_rpm(
-            obstacle_avoidance_get_left_speed());
-        target_right = avoidance_target_rpm(
-            obstacle_avoidance_get_right_speed());
-        actual_left = avoidance_actual_rpm(
-            obstacle_avoidance_get_left_speed(), ENCODER_LEFT);
-        actual_right = avoidance_actual_rpm(
-            obstacle_avoidance_get_right_speed(), ENCODER_RIGHT);
-        output_left = obstacle_avoidance_get_left_speed();
-        output_right = obstacle_avoidance_get_right_speed();
-    }
-    else
-    {
-        target_left = wheel_get_target_rpm(WHEEL_LEFT);
-        target_right = wheel_get_target_rpm(WHEEL_RIGHT);
-        actual_left = wheel_get_rpm(WHEEL_LEFT);
-        actual_right = wheel_get_rpm(WHEEL_RIGHT);
-        output_left = wheel_get_output(WHEEL_LEFT);
-        output_right = wheel_get_output(WHEEL_RIGHT);
-    }
+    target_left = wheel_get_target_rpm(WHEEL_LEFT);
+    target_right = wheel_get_target_rpm(WHEEL_RIGHT);
+    actual_left = wheel_get_rpm(WHEEL_LEFT);
+    actual_right = wheel_get_rpm(WHEEL_RIGHT);
+    output_left = wheel_get_output(WHEEL_LEFT);
+    output_right = wheel_get_output(WHEEL_RIGHT);
 
-    printf("[RUN] %-16s | front:%4u mm | pose X:%4d Y:%4d Z:%4d deg | "
+    printf("[RUN] %-14s | L:%4u F:%4u R:%4u mm | "
+           "pose X:%4d Y:%4d Z:%4d deg | "
            "target L:%4d R:%4d RPM | actual L:%4d R:%4d RPM | PWM L:%4d R:%4d%%\r\n",
            state_name(),
+           read_left_mm(),
            read_front_mm(),
+           read_right_mm(),
            (int)pose_x,
            (int)pose_y,
            (int)pose_z,
@@ -712,31 +575,46 @@ static void print_status(void)
            (int)output_right);
 }
 
-/* 회피 상태 머신에 제어를 넘기는 내부 함수 */
-static void enter_avoidance(void)
+/* 로그에서 회피 방향을 사람이 읽을 수 있는 이름으로 바꾼다. */
+static const char *avoid_direction_name(avoid_direction_t direction)
 {
-    uint16_t front = read_front_mm();
+    if (direction == AVOID_DIRECTION_LEFT) { return "LEFT"; }
+    if (direction == AVOID_DIRECTION_RIGHT) { return "RIGHT"; }
+    return "NONE";
+}
 
-    /* 장애물 회피가 최우선이므로 방지턱 속도 상태를 해제한다. */
-    speed_bump_control_reset();
-    reset_bump_yaw_recovery();
+/* 회피 상태가 실제로 바뀐 순간만 출력해 20ms 반복 로그 폭주를 막는다. */
+static void print_avoidance_state_change(void)
+{
+    avoid_state_t state;
 
-    /* drive 가 모터를 잡고 있으면 안 되므로 먼저 놓게 한다 */
-    drive_stop();
+    if (obstacle_avoidance_take_state_change(&state))
+    {
+        printf("\r\n[EVENT][AVOID] state=%s | L:%u F:%u R:%u mm\r\n",
+               obstacle_avoidance_state_name(state),
+               read_left_mm(), read_front_mm(), read_right_mm());
+    }
+}
 
-    /* 이번 시험 규칙은 항상 왼쪽 90도 회피다. */
-    obstacle_avoidance_start(AVOID_DIRECTION_LEFT,
-                             heading_get_current(),
-                             drive_get_distance_mm());
+/* 회피 모듈이 계산한 추상 명령을 유일한 차량 주행 계층인 drive에 적용한다. */
+static void apply_avoidance_command(void)
+{
+    obstacle_avoidance_command_t command;
 
-    mission_control_begin_avoidance();
-    last_avoid_stall_restart_count = 0;
-    obstacle_confirmed = false;
-    obstacle_count = 0;
-    clear_count = 0;
-
-    printf("\r\n[EVENT][OBSTACLE] Detected at %u mm -> avoidance start\r\n",
-           front);
+    obstacle_avoidance_get_command(&command);
+    if (command.motion == AVOID_MOTION_ROTATE_HEADING)
+    {
+        drive_recover_heading(command.target_heading_deg);
+    }
+    else if (command.motion == AVOID_MOTION_TRACK_HEADING)
+    {
+        drive_follow_heading(command.base_rpm,
+                             command.target_heading_deg);
+    }
+    else
+    {
+        drive_stop();
+    }
 }
 
 /* 회피가 끝난 뒤 정상 주행으로 돌아가는 내부 함수 */
@@ -746,21 +624,25 @@ static void leave_avoidance(void)
     {
         switch (obstacle_avoidance_get_failure())
         {
-            case AVOID_FAILURE_FRONT_BLOCKED:
-                printf("\r\n[ERROR][OBSTACLE] Path still blocked - stopped\r\n");
+            case AVOID_FAILURE_NO_DIRECTION:
+                printf("\r\n[ERROR][AVOID] Both side paths are blocked\r\n");
                 break;
 
-            case AVOID_FAILURE_TURN_TIMEOUT:
-                recover_critical_vehicle_fault(
-                    VEHICLE_FAULT_TURN_CONTROL,
-                    "Obstacle turn did not reach the gyro target in time");
-                return;
+            case AVOID_FAILURE_SENSOR:
+                printf("\r\n[ERROR][AVOID] A distance sensor became unavailable\r\n");
+                break;
 
-            case AVOID_FAILURE_MOTOR_STALL:
-                recover_critical_vehicle_fault(
-                    VEHICLE_FAULT_MOTOR_ENCODER,
-                    "Motor restart failed or encoder RPM remained below 30 RPM");
-                return;
+            case AVOID_FAILURE_ESCAPE_BLOCKED:
+                printf("\r\n[ERROR][AVOID] Emergency escape has no verified path\r\n");
+                break;
+
+            case AVOID_FAILURE_TIMEOUT:
+                printf("\r\n[ERROR][AVOID] State/total timeout\r\n");
+                break;
+
+            case AVOID_FAILURE_MAX_TRAVEL:
+                printf("\r\n[ERROR][AVOID] Maximum avoidance travel exceeded\r\n");
+                break;
 
             default:
                 printf("\r\n[ERROR][AVOIDANCE] Avoidance failed - stopped\r\n");
@@ -777,11 +659,6 @@ static void leave_avoidance(void)
     /* 다음 회피를 위해 상태 머신을 대기로 되돌린다 */
     obstacle_avoidance_reset();
 
-    /* 회피 완료 직후 이전 장애물 이벤트가 다시 발생하지 않게 초기화한다. */
-    obstacle_confirmed = false;
-    obstacle_count = 0;
-    clear_count = 0;
-
     /* 방향 기준은 그대로 두므로 원래 진행 방향으로 복귀한다 */
     speed_bump_control_reset();
     reset_bump_yaw_recovery();
@@ -789,10 +666,48 @@ static void leave_avoidance(void)
     mission_control_resume_driving();
 }
 
+/* 정상 주행과 회피 주행이 공통으로 호출하는 장애물 흐름.
+ * 새 이벤트가 시작되거나 진행 중이면 true를 반환해 이번 제어권을 유지한다. */
+static bool update_obstacle_flow(uint32_t dt)
+{
+    bool started;
+
+    obstacle_avoidance_update(&distance_snapshot,
+                              heading_get_current(),
+                              drive_get_distance_mm(),
+                              dt);
+    started = obstacle_avoidance_take_started();
+
+    if (started)
+    {
+        speed_bump_control_reset();
+        reset_bump_yaw_recovery();
+        mission_control_begin_avoidance();
+
+        printf("\r\n[EVENT][OBSTACLE] F:%u mm, choose %s (L:%u R:%u)\r\n",
+               read_front_mm(),
+               avoid_direction_name(obstacle_avoidance_get_direction()),
+               read_left_mm(), read_right_mm());
+    }
+
+    if (!mission_control_is_avoiding())
+    {
+        return false;
+    }
+
+    print_avoidance_state_change();
+    apply_avoidance_command();
+
+    if (obstacle_avoidance_is_running() == false)
+    {
+        leave_avoidance();
+    }
+    return true;
+}
+
 /* 정상 주행과 회피를 오가며 한 주기 제어를 수행하는 내부 함수 */
 static void control_step(uint32_t dt)
 {
-    uint16_t front = read_front_mm();
     bool bump_was_active;
 
     if (wheel_calibration_is_active() == true)
@@ -842,54 +757,14 @@ static void control_step(uint32_t dt)
         return;
     }
 
-    /* 거리 센서가 연속으로 실패하면 장애물 없음으로 간주하지 않고 정지한다. */
-    if (distance_sensor_fault == true)
+    /* 세 거리 센서 중 하나라도 연속 실패하거나 오래된 값이면 안전 정지한다. */
+    if (distance_snapshot.all_healthy == false)
     {
-        printf("\r\n[ERROR][DISTANCE] VL53L0X measurement failed - stopped\r\n");
+        printf("\r\n[ERROR][DISTANCE] L/F/R sensor unhealthy or stale - stopped\r\n");
 
         mission_control_emergency_stop();
         obstacle_avoidance_reset();
         drive_stop();
-        return;
-    }
-
-    if (mission_control_is_avoiding() == true)
-    {
-        /* 자이로와 엔코더 측정은 drive가 갱신하고 PID는 직접 출력 모드에서 끈다. */
-        drive_update(dt);
-
-        if (drive_is_ready() == false)
-        {
-            recover_critical_vehicle_fault(
-                VEHICLE_FAULT_GYRO,
-                "MPU6050 data update failed during obstacle avoidance");
-            return;
-        }
-
-        /* 회피 중에는 상태 머신이 계산한 출력을 drive의 직접 출력 모드로 넣는다. */
-        obstacle_avoidance_update(heading_get_current(),
-                                  drive_get_distance_mm(),
-                                  front,
-                                  encoder_get_rpm(ENCODER_LEFT),
-                                  encoder_get_rpm(ENCODER_RIGHT));
-
-        drive_set_direct_output(obstacle_avoidance_get_left_speed(),
-                                obstacle_avoidance_get_right_speed());
-
-        {
-            uint32_t restart_count = obstacle_avoidance_get_restart_count();
-
-            if (restart_count > last_avoid_stall_restart_count)
-            {
-                printf("\r\n[RECOVERY][MOTOR] RPM low for 5 s -> startup retry 1/1\r\n");
-            }
-            last_avoid_stall_restart_count = restart_count;
-        }
-
-        if (obstacle_avoidance_is_running() == false)
-        {
-            leave_avoidance();
-        }
         return;
     }
 
@@ -900,18 +775,23 @@ static void control_step(uint32_t dt)
         return;
     }
 
-    /* 정상 주행 중 전방이 막히면 회피로 넘어간다 */
-    if (obstacle_confirmed == true)
-    {
-        enter_avoidance();
-        return;
-    }
-
     bump_was_active =
         (speed_bump_control_get_state() != SPEED_BUMP_STATE_NORMAL);
 
+    /* 먼저 자이로·엔코더 PID를 갱신한 뒤 최신 자세와 이동거리를 회피기에 준다. */
     drive_update(dt);
+
+    if (update_obstacle_flow(dt))
+    {
+        return;
+    }
+
     update_speed_bump_control(dt);
+
+    if (mission_control_is_running() == false)
+    {
+        return;
+    }
 
     /* 같은 주기에서 방지턱 상태가 종료되더라도 이미 발생한 Z 이탈을 놓치지 않는다. */
     if (bump_was_active
@@ -934,13 +814,13 @@ static void control_step(uint32_t dt)
 
         if (restart_count > last_wheel_stall_restart_count)
         {
-            printf("\r\n[RECOVERY][MOTOR] RPM low for 5 s -> startup retry 1/1\r\n");
+            printf("\r\n[RECOVERY][MOTOR] RPM low for 2 s -> startup retry 1/1\r\n");
         }
         last_wheel_stall_restart_count = restart_count;
     }
 }
 
-/* S 버튼 세 번으로 요청된 거리센서 복구를 안전한 정지 상태에서 수행한다. */
+/* S 버튼 또는 자이로 버튼 빠른 3회로 요청된 거리센서 복구를 안전하게 수행한다. */
 static void recover_distance_sensor(void)
 {
     bool initialized;
@@ -962,8 +842,14 @@ static void recover_distance_sensor(void)
     distance_recovery_attempts++;
 
     /* 센서를 재초기화하는 동안에는 어떤 모터 명령도 남지 않게 한다. */
+    if (wheel_calibration_is_armed() || wheel_calibration_is_active())
+    {
+        wheel_calibration_cancel();
+    }
     mission_control_stop();
     obstacle_avoidance_reset();
+    speed_bump_control_reset();
+    reset_bump_yaw_recovery();
     drive_stop();
 
     printf("\r\n[DIST] recovery attempt %u/%u\r\n",
@@ -971,8 +857,7 @@ static void recover_distance_sensor(void)
            ROVER_RECOVERY_MAX_ATTEMPTS);
     printf("[DIST] XSHUT reset and sensor initialization\r\n");
 
-    reset_distance_filter();
-    initialized = vl53l0x_init_all();
+    initialized = proximity_monitor_init();
 
     if (initialized == true)
     {
@@ -990,6 +875,7 @@ static void recover_distance_sensor(void)
     }
     else
     {
+        print_distance_init_error(initialized);
         printf("[DIST] recovery failed - vehicle remains stopped\r\n");
     }
 }
@@ -1019,7 +905,7 @@ static void start_driving(const char *source)
         return;
     }
 
-    if (distance_sensor_fault == true)
+    if (distance_snapshot.all_healthy == false)
     {
         now = HAL_GetTick();
 
@@ -1128,6 +1014,21 @@ static void handle_command(uint8_t ch)
 
         case 'z':
         case 'Z':
+        {
+            uint32_t now = HAL_GetTick();
+
+            if ((yaw_reset_press_count == 0U)
+                || ((now - yaw_reset_first_tick)
+                    > ROVER_YAW_RESET_TRIPLE_WINDOW_MS))
+            {
+                yaw_reset_press_count = 1U;
+                yaw_reset_first_tick = now;
+            }
+            else if (yaw_reset_press_count < ROVER_YAW_RESET_TRIPLE_COUNT)
+            {
+                yaw_reset_press_count++;
+            }
+
             drive_reset_heading();
             if (fault_recovery_ready == true)
             {
@@ -1143,7 +1044,16 @@ static void handle_command(uint8_t ch)
                 mission_control_resume_driving();
             }
             printf("[COMMAND] Pose reference reset to zero\r\n");
+
+            if (yaw_reset_press_count >= ROVER_YAW_RESET_TRIPLE_COUNT)
+            {
+                yaw_reset_press_count = 0U;
+                yaw_reset_first_tick = 0U;
+                printf("[COMMAND] YAW reset x3 -> distance sensor reinitialization\r\n");
+                recover_distance_sensor();
+            }
             break;
+        }
 
         case 'c':
         case 'C':
@@ -1278,7 +1188,8 @@ static void poll_ir_remote(void)
             break;
 
         case ROVER_IR_DISTANCE_CMD:
-            handle_command('d');
+            /* 무선 입력 시험용: DISTANCE 버튼으로 기존 2단계 보정을 실행한다. */
+            handle_command('c');
             break;
 
         case ROVER_IR_SLOW_CMD:
@@ -1304,7 +1215,6 @@ static void poll_ir_remote(void)
  * 자이로 영점 보정 중에는 차체를 절대 움직이면 안 된다. */
 void rover_app_init(void)
 {
-    obstacle_avoidance_config_t config;
     bool sensor_initialized;
     bool distance_ready = false;
     bool drive_initialized;
@@ -1323,15 +1233,19 @@ void rover_app_init(void)
            drive_is_right_encoder_ready() ? "OK" : "ERROR");
     printf("[INIT] MPU6050 gyro ........ %s\r\n",
            drive_is_heading_ready() ? "OK" : "ERROR");
+    if (drive_is_heading_ready() == false)
+    {
+        print_mpu6050_init_error();
+    }
 
-    reset_distance_filter();
     blocked_start_count = 0;
     blocked_start_first_tick = 0;
     distance_recovery_attempts = 0;
     distance_recovery_in_progress = false;
+    yaw_reset_press_count = 0;
+    yaw_reset_first_tick = 0;
     last_wheel_stall_restart_count = 0;
-    last_avoid_stall_restart_count = 0;
-    sensor_initialized = vl53l0x_init_all();
+    sensor_initialized = proximity_monitor_init();
 
     obstacle_avoidance_init();
     speed_bump_control_init();
@@ -1343,33 +1257,31 @@ void rover_app_init(void)
     fault_heading_reference_set = false;
     fault_recovery_failed = false;
 
-    config.obstacle_distance_mm = ROVER_OBSTACLE_MM;
-    config.bypass_distance_mm   = ROVER_BYPASS_MM;
-    config.forward_speed        = DRIVE_SPEED_NORMAL;
-    /* 기존 최대 출력 회전은 관성이 컸으므로 정상 속도로 낮춘다. */
-    config.turn_speed           = DRIVE_SPEED_NORMAL;
-    config.turn_angle_deg       = ROVER_TURN_ANGLE_DEG;
-
-    obstacle_avoidance_set_config(&config);
-
     /* non-blocking 측정 상태머신을 반복 진행해 출발 전에 정상값을 확보한다. */
     if (sensor_initialized == true)
     {
         distance_ready = wait_for_distance_sensor(ROVER_SENSOR_STARTUP_TIMEOUT_MS);
     }
 
-    printf("[INIT] VL53L0X distance .... %s",
+    printf("[INIT] VL53L0X L/F/R ....... %s",
            distance_ready ? "OK" : "ERROR");
     if (distance_ready == true)
     {
-        printf(" (%u mm)\r\n", read_front_mm());
+        printf(" (%u/%u/%u mm)\r\n",
+               read_left_mm(), read_front_mm(), read_right_mm());
     }
     else
     {
         printf("\r\n");
+        print_distance_init_error(sensor_initialized);
     }
 
-    printf("[INIT] Avoidance control ... OK (30 deg x 3 turns)\r\n");
+    printf("[INIT] Avoidance control ... OK (smooth Yaw/RPM tracking)\r\n");
+    printf("[READY] Avoid at F <= %u mm x %u; emergency F <= %u mm\r\n",
+           ROVER_AVOID_TRIGGER_MM,
+           ROVER_AVOID_TRIGGER_CONFIRM_COUNT,
+           ROVER_AVOID_FRONT_EMERGENCY_MM);
+    printf("[READY] Events: detected wall -> avoid; low bump -> Pitch control\r\n");
     printf("[INIT] Speed bump control .. OK (Pitch Y axis)\r\n");
     printf("[READY] Speed bump: Y >= +10 deg, level = -5..+5 deg\r\n");
     printf("[READY] Bump yaw recovery: |Z| >= 30 deg -> return to Z=0\r\n");
@@ -1411,13 +1323,12 @@ void rover_app_run(void)
         poll_uart();
         poll_ir_remote();
 
-        /* 센서를 먼저 갱신한다.
-         * 회피 판단이 최신 거리값을 쓰도록 제어보다 앞에 둔다 */
+        /* 세 센서를 먼저 갱신해 회피 판단이 최신 스냅샷을 사용하게 한다. */
         now = HAL_GetTick();
         if ((now - sensor_tick) >= SENSOR_PERIOD_MS)
         {
             sensor_tick = now;
-            update_front_sensor();
+            update_distance_sensors();
         }
 
         /* 제어 주기마다 주행과 회피를 갱신한다.

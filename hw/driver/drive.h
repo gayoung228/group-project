@@ -6,7 +6,7 @@
 #include "rover_config.h"
 
 /* 주행 속도 단계 [PWM %]
- * 80 아래에서는 차가 아예 움직이지 않으므로 이 범위 안에서만 쓴다. */
+ * 공중 실측에서 양쪽 바퀴가 계속 회전한 70% 이상만 사용한다. */
 #define DRIVE_SPEED_SLOW      ROVER_MOTOR_MIN_OUTPUT
 #define DRIVE_SPEED_NORMAL    ROVER_MOTOR_NORMAL_OUTPUT
 #define DRIVE_SPEED_FAST      ROVER_MOTOR_MAX_OUTPUT
@@ -47,6 +47,10 @@ float drive_speed_to_rpm(uint8_t speed);
 
 // 주행 단계값은 유지하면서 방지턱 같은 일시적 목표 RPM을 적용한다.
 void drive_set_forward_target_rpm(float target_rpm);
+
+/* 지정 RPM으로 전진하면서 연속적으로 바뀌는 절대 Yaw 목표를 추종한다.
+ * 거리 회피는 이 함수만 호출하고 wheel/motor를 직접 만지지 않는다. */
+void drive_follow_heading(float target_rpm, float target_heading_deg);
 
 /* 장애물 회피처럼 좌우 출력을 직접 정해야 할 때도 motor를 우회하지 않고
  * drive를 통해 -100~100 출력 명령을 적용한다. */

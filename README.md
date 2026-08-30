@@ -1,15 +1,16 @@
 # TERRA 자율주행 로버
 
 STM32F411RE 기반 2륜 로버 프로젝트입니다. 엔코더로 좌우 바퀴 속도를 측정하고,
-MPU6050으로 진행 방향을 보정하며, VL53L0X와 IR 리모컨으로 장애물 회피와 원격
+MPU6050으로 진행 방향을 보정하며, VL53L0X 3개와 IR 리모컨으로 장애물 회피와 원격
 명령을 수행합니다.
 
 ## 현재 동작
 
 - IR 리모컨으로 주행 시작·정지, 속도 변경, 기준 방향 재설정
 - 자이로와 엔코더를 함께 사용한 직진 보정
-- 정면 장애물 감지 후 `좌회전 → 우회 거리 전진 → 우회전 → 직진 복귀`
+- 좌·정면·우 거리로 넓은 방향을 선택하고 Yaw/RPM 폐루프로 부드럽게 벽 회피
 - 과속방지턱의 오르막·내리막 및 자세 이탈 대응
+- 벽 회피와 낮은 방지턱 통과를 순서·횟수 제한 없이 독립적으로 반복
 - 정지한 바퀴를 감지하면 한 번 재시동하고, 실패하면 안전 정지
 - UART `c` 명령으로 좌·우 모터의 공중 PWM-RPM 특성 자동 측정
 - 주행 불능 오류 시 긴급정지·하드웨어 재시동·Z/START 재출발 안내
@@ -26,7 +27,7 @@ app/
 hw/
   driver/             모터, 엔코더, IMU, 거리센서 등 하드웨어 드라이버
   control/            방향, 장애물, 방지턱, 임무 상태 제어
-  rover_config.h      바퀴 치수와 RPM 등 공통 물리 설정
+  rover_config.h      바퀴 치수, RPM, 회피 거리·각도 등 공통 튜닝 설정
 docs/                 핀맵, 배선, 인터페이스, 시험 절차
 ```
 
@@ -37,7 +38,7 @@ IR·거리·IMU 입력
        ↓
 rover_app ──→ mission_control(현재 주행 상태)
        ↓
-heading / obstacle / speed_bump 제어
+proximity → obstacle / heading / speed_bump 제어
        ↓
 drive(최종 모터 명령의 단일 통로)
        ↓
@@ -72,5 +73,6 @@ cmake --preset Debug -DROVER_FIRMWARE_MODE=VL53_TEST
 - [현재 구현 기능](docs/features.md)
 - [주요 모듈 인터페이스](docs/interface.md)
 - [시험 절차](docs/test-plan.md)
+- [3센서 부드러운 장애물 회피 설계](docs/smooth-obstacle-avoidance.md)
 
 모터를 처음 시험할 때는 바퀴를 바닥에서 띄우고, 비상 정지 수단을 준비합니다.

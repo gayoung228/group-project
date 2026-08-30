@@ -15,14 +15,22 @@
  * 너무 크면 직진 중에 차가 좌우로 요동친다. */
 #define HEADING_CORRECTION_MAX      25.0f
 
-/* 모터 실측 제어 범위를 넘는 좌우 목표가 만들어지지 않게 한다. */
-#define HEADING_WHEEL_RPM_MAX      ROVER_DRIVE_RPM_MAX
+/* 직진·후진에서 좌우 목표 RPM 차이가 이 값을 넘지 않게 한다.
+ * 큰 자이로 오차가 순간적으로 들어와도 급회전이나 유턴으로 이어지지 않는다. */
+#define HEADING_DRIVE_DIFFERENTIAL_MAX  ROVER_HEADING_DRIVE_DIFFERENTIAL_MAX
 
-/* 보정 힘은 높이되 한 번에 튀지 않도록 20ms마다 최대 8RPM씩 바꾼다. */
-#define HEADING_CORRECTION_STEP      8.0f
+/* 공중 측정에서 확인한 좌우 모터별 물리적 RPM 상한 */
+#define HEADING_LEFT_RPM_MAX       ROVER_LEFT_WHEEL_RPM_MAX
+#define HEADING_RIGHT_RPM_MAX      ROVER_RIGHT_WHEEL_RPM_MAX
+
+/* 바퀴의 실제 반응이 따라올 시간을 주도록 보정량을 천천히 바꾼다. */
+#define HEADING_CORRECTION_STEP      3.0f
 
 /* 제자리 회전이 센서/부호 문제로 멈추지 않는 경우의 안전 제한 [ms] */
 #define HEADING_ROTATION_TIMEOUT_MS  5000U
+
+/* 목표 통과 뒤 관성 회전이 멎을 때까지 반대 방향 재보정을 금지하는 시간 */
+#define HEADING_ROTATION_SETTLE_MS    300U
 
 /* 적분항이 쌓일 수 있는 한계 (적분 포화 방지) */
 #define HEADING_INTEGRAL_LIMIT      200.0f
@@ -36,7 +44,7 @@
 
 /* PID 게인 초기값 (실측 후 튜닝할 것)
  * 오차 1도당 몇 RPM 을 보정할지가 Kp 의 의미이다. */
-#define HEADING_DEFAULT_KP          4.0f
+#define HEADING_DEFAULT_KP          2.0f
 #define HEADING_DEFAULT_KI          0.0f
 #define HEADING_DEFAULT_KD          0.0f
 
@@ -60,8 +68,11 @@ static float heading_base_rpm = 0.0f;
 
 /* base RPM이 0일 때 '정지'와 '제자리 회전'을 구분한다. */
 static bool heading_rotation_active = false;
+static bool heading_rotation_settling = false;
+static bool heading_rotation_correction = false;
 static float heading_rotation_direction = 0.0f;
 static uint32_t heading_rotation_start_tick = 0;
+static uint32_t heading_rotation_settle_tick = 0;
 
 /* PID 내부 상태 */
 static float heading_integral = 0.0f;
@@ -128,12 +139,37 @@ static void heading_clear_pid(void)
     heading_correction = 0.0f;
 }
 
+/* 목표 근처에서 모터를 끄고 차체의 회전 관성이 가라앉는 구간으로 들어간다. */
+static void heading_begin_rotation_settle(void)
+{
+    heading_rotation_active = false;
+    heading_rotation_settling = true;
+    heading_rotation_direction = 0.0f;
+    heading_rotation_settle_tick = HAL_GetTick();
+    heading_clear_pid();
+    wheel_stop();
+}
+
+/* 최저 RPM이 높은 제자리 회전은 정지 관성만큼 목표를 조금 지나칠 수 있다. */
+bool heading_is_rotation_aligned(void)
+{
+    float error = heading_error_deg;
+
+    if (error < 0.0f)
+    {
+        error = -error;
+    }
+
+    return (error <= ROVER_HEADING_ROTATION_TOLERANCE_DEG);
+}
+
 /* 계산된 기본 속도와 보정량을 좌우 목표 RPM 으로 내려보내는 내부 함수 */
 static void heading_apply(void)
 {
     float left_rpm;
     float right_rpm;
     float base_magnitude;
+    float desired_difference;
 
     /* 정지와 제자리 회전은 둘 다 base RPM이 0이다.
      * 회전 명령이 없다면 Yaw 오차가 있어도 모터를 절대 구동하지 않는다. */
@@ -147,29 +183,45 @@ static void heading_apply(void)
     /* 제자리 회전이 목표 각도에 도달하면 즉시 정지한다. */
     if ((heading_rotation_active == true) && (heading_is_aligned() == true))
     {
-        heading_rotation_active = false;
-        heading_correction = 0.0f;
-        wheel_stop();
+        heading_begin_rotation_settle();
         return;
     }
 
     if (heading_base_rpm > 0.0f)
     {
-        /* 직진 보정은 한쪽을 감속하지 않고 반대쪽을 가속한다.
-         * 따라서 마찰 때문에 멈추는 90RPM 아래로 어느 바퀴도 내려가지 않는다. */
+        /* desired_difference = 오른쪽 목표 - 왼쪽 목표.
+         * 양수면 오른쪽을, 음수면 왼쪽을 더 빠르게 한다. */
         base_magnitude = heading_clamp(heading_base_rpm,
                                        ROVER_DRIVE_RPM_MIN,
-                                       HEADING_WHEEL_RPM_MAX);
-        left_rpm = base_magnitude;
-        right_rpm = base_magnitude;
+                                       ROVER_DRIVE_RPM_MAX);
+        desired_difference = heading_clamp(2.0f * heading_correction,
+                                            -HEADING_DRIVE_DIFFERENTIAL_MAX,
+                                             HEADING_DRIVE_DIFFERENTIAL_MAX);
 
-        if (heading_correction > 0.0f)
+        if (desired_difference >= 0.0f)
         {
-            right_rpm += 2.0f * heading_correction;
+            left_rpm = base_magnitude;
+            right_rpm = base_magnitude + desired_difference;
+
+            /* 오른쪽 상한에 닿을 때만 왼쪽을 낮춰 필요한 차이를 만든다. */
+            if (right_rpm > HEADING_RIGHT_RPM_MAX)
+            {
+                right_rpm = HEADING_RIGHT_RPM_MAX;
+                left_rpm = right_rpm - desired_difference;
+            }
         }
         else
         {
-            left_rpm += -2.0f * heading_correction;
+            right_rpm = base_magnitude;
+            left_rpm = base_magnitude - desired_difference;
+
+            /* 왼쪽 모터는 최대 78RPM이라 여유가 작다.
+             * 상한에 닿으면 오른쪽을 조금 낮추되 최저 RPM은 유지한다. */
+            if (left_rpm > HEADING_LEFT_RPM_MAX)
+            {
+                left_rpm = HEADING_LEFT_RPM_MAX;
+                right_rpm = left_rpm + desired_difference;
+            }
         }
     }
     else if (heading_base_rpm < 0.0f)
@@ -177,34 +229,59 @@ static void heading_apply(void)
         /* 후진도 같은 원칙으로 한쪽의 절댓값만 높인다. */
         base_magnitude = heading_clamp(-heading_base_rpm,
                                        ROVER_DRIVE_RPM_MIN,
-                                       HEADING_WHEEL_RPM_MAX);
-        left_rpm = -base_magnitude;
-        right_rpm = -base_magnitude;
+                                       ROVER_DRIVE_RPM_MAX);
+        desired_difference = heading_clamp(2.0f * heading_correction,
+                                            -HEADING_DRIVE_DIFFERENTIAL_MAX,
+                                             HEADING_DRIVE_DIFFERENTIAL_MAX);
 
-        if (heading_correction > 0.0f)
+        /* 후진 RPM은 음수지만 right-left 차이의 의미는 전진과 같다. */
+        if (desired_difference >= 0.0f)
         {
-            left_rpm -= 2.0f * heading_correction;
+            right_rpm = -base_magnitude;
+            left_rpm = right_rpm - desired_difference;
+
+            if (left_rpm < -HEADING_LEFT_RPM_MAX)
+            {
+                left_rpm = -HEADING_LEFT_RPM_MAX;
+                right_rpm = left_rpm + desired_difference;
+            }
         }
         else
         {
-            right_rpm += 2.0f * heading_correction;
+            left_rpm = -base_magnitude;
+            right_rpm = left_rpm + desired_difference;
+
+            if (right_rpm < -HEADING_RIGHT_RPM_MAX)
+            {
+                right_rpm = -HEADING_RIGHT_RPM_MAX;
+                left_rpm = right_rpm - desired_difference;
+            }
         }
     }
     else
     {
-        /* 제자리 회전은 좌우가 반대로 돌아야 하므로 기존 방식을 유지한다. */
+        /* 제자리 회전은 좌우가 반대로 돈다. 여기서 계산한 값이 작더라도
+         * wheel 계층이 0이 아닌 목표를 공통 최저 RPM까지 끌어올린다. */
         left_rpm  = -heading_correction;
         right_rpm = heading_correction;
     }
 
     left_rpm = heading_clamp(left_rpm,
-                             -HEADING_WHEEL_RPM_MAX,
-                              HEADING_WHEEL_RPM_MAX);
+                             -HEADING_LEFT_RPM_MAX,
+                              HEADING_LEFT_RPM_MAX);
     right_rpm = heading_clamp(right_rpm,
-                              -HEADING_WHEEL_RPM_MAX,
-                               HEADING_WHEEL_RPM_MAX);
+                              -HEADING_RIGHT_RPM_MAX,
+                               HEADING_RIGHT_RPM_MAX);
 
-    wheel_set_target_rpm_both(left_rpm, right_rpm);
+    if ((heading_base_rpm == 0.0f) && heading_rotation_correction)
+    {
+        /* 목표를 한 번 지나친 뒤의 미세 보정에는 100% 재시동을 쓰지 않는다. */
+        wheel_set_target_rpm_both_no_kick(left_rpm, right_rpm);
+    }
+    else
+    {
+        wheel_set_target_rpm_both(left_rpm, right_rpm);
+    }
 }
 
 /* MPU6050을 읽고 현재 X/Y/Z 및 목표와의 Yaw 오차만 갱신한다. */
@@ -255,8 +332,11 @@ bool heading_init(void)
     heading_error_deg   = 0.0f;
     heading_base_rpm    = 0.0f;
     heading_rotation_active = false;
+    heading_rotation_settling = false;
+    heading_rotation_correction = false;
     heading_rotation_direction = 0.0f;
     heading_rotation_start_tick = 0;
+    heading_rotation_settle_tick = 0;
 
     heading_clear_pid();
 
@@ -277,8 +357,11 @@ void heading_reset(void)
     heading_pitch_deg   = 0.0f;
     heading_error_deg   = 0.0f;
     heading_rotation_active = false;
+    heading_rotation_settling = false;
+    heading_rotation_correction = false;
     heading_rotation_direction = 0.0f;
     heading_rotation_start_tick = 0;
+    heading_rotation_settle_tick = 0;
     heading_clear_pid();
 }
 
@@ -302,7 +385,32 @@ void heading_update(uint32_t elapsed_time_ms)
         return;
     }
 
-    /* 회전이 목표를 지나쳤거나 제한 시간을 넘기면 무조건 정지한다. */
+    /* 목표를 통과한 직후에는 관성이 가라앉을 때까지 정지한다. 300ms 뒤에도
+     * 오차가 12도보다 크면 그때 새 방향으로 보정 회전을 시작한다. */
+    if (heading_rotation_settling == true)
+    {
+        wheel_stop();
+
+        if ((HAL_GetTick() - heading_rotation_settle_tick)
+            < HEADING_ROTATION_SETTLE_MS)
+        {
+            return;
+        }
+
+        if (heading_is_rotation_aligned() == true)
+        {
+            return;
+        }
+
+        heading_rotation_settling = false;
+        heading_rotation_active = true;
+        heading_rotation_correction = true;
+        heading_rotation_direction = (heading_error_deg >= 0.0f) ? 1.0f : -1.0f;
+        heading_rotation_start_tick = HAL_GetTick();
+        heading_clear_pid();
+    }
+
+    /* 회전이 목표를 지나쳤거나 제한 시간을 넘기면 먼저 관성 안정화로 들어간다. */
     if (heading_rotation_active == true)
     {
         bool target_passed = ((heading_rotation_direction > 0.0f) &&
@@ -314,10 +422,7 @@ void heading_update(uint32_t elapsed_time_ms)
 
         if (target_passed || timed_out)
         {
-            heading_rotation_active = false;
-            heading_rotation_direction = 0.0f;
-            heading_clear_pid();
-            wheel_stop();
+            heading_begin_rotation_settle();
             return;
         }
     }
@@ -378,6 +483,9 @@ void heading_set_base_rpm(float base_rpm)
     if (base_rpm != 0.0f)
     {
         heading_rotation_active = false;
+        heading_rotation_settling = false;
+        heading_rotation_correction = false;
+        heading_rotation_settle_tick = 0U;
     }
 }
 
@@ -392,8 +500,11 @@ void heading_rotate(float delta_deg)
 {
     heading_target_deg = heading_normalize_360(heading_target_deg + delta_deg);
     heading_rotation_active = true;
+    heading_rotation_settling = false;
+    heading_rotation_correction = false;
     heading_rotation_direction = (delta_deg >= 0.0f) ? 1.0f : -1.0f;
     heading_rotation_start_tick = HAL_GetTick();
+    heading_rotation_settle_tick = 0U;
 
     /* 목표가 크게 바뀌면 이전 누적값은 의미가 없다 */
     heading_integral   = 0.0f;
@@ -407,13 +518,34 @@ void heading_set_target(float target_deg)
 
     heading_target_deg = heading_normalize_360(target_deg);
     heading_rotation_active = (heading_base_rpm == 0.0f);
+    heading_rotation_settling = false;
+    heading_rotation_correction = false;
 
     delta_deg = heading_normalize_error(heading_target_deg - heading_current_deg);
     heading_rotation_direction = (delta_deg >= 0.0f) ? 1.0f : -1.0f;
     heading_rotation_start_tick = HAL_GetTick();
+    heading_rotation_settle_tick = 0U;
 
     heading_integral   = 0.0f;
     heading_prev_error = 0.0f;
+}
+
+/* 전진 중의 연속 목표 갱신용 함수다. heading_set_target()과 달리 매 호출마다
+ * 적분·이전 오차를 초기화하지 않으므로 20ms 목표 램프가 끊기지 않는다. */
+void heading_track_target(float target_deg)
+{
+    heading_target_deg = heading_normalize_360(target_deg);
+
+    /* 이 API는 base RPM이 있는 곡선 주행 전용이며 제자리 회전 완료 판정을 끈다. */
+    if (heading_base_rpm != 0.0f)
+    {
+        heading_rotation_active = false;
+        heading_rotation_settling = false;
+        heading_rotation_correction = false;
+        heading_rotation_direction = 0.0f;
+        heading_rotation_start_tick = 0U;
+        heading_rotation_settle_tick = 0U;
+    }
 }
 
 /* 현재 기준 방향을 반환한다. */
@@ -494,6 +626,18 @@ bool heading_is_sensor_ready(void)
     return heading_sensor_ready;
 }
 
+/* 제자리 회전 제어기가 아직 목표를 향해 모터를 구동 중인지 반환한다. */
+bool heading_is_rotation_active(void)
+{
+    return heading_rotation_active;
+}
+
+/* 목표 통과 후 모터를 끄고 회전 관성이 가라앉기를 기다리는 중인지 반환한다. */
+bool heading_is_rotation_settling(void)
+{
+    return heading_rotation_settling;
+}
+
 /* 현재 방향이 기준 방향에 충분히 가까운지 반환한다. */
 bool heading_is_aligned(void)
 {
@@ -504,6 +648,11 @@ bool heading_is_aligned(void)
         error = -error;
     }
 
+    if (heading_rotation_settling == true)
+    {
+        return (error <= ROVER_HEADING_ROTATION_TOLERANCE_DEG);
+    }
+
     return (error <= HEADING_ALIGN_TOLERANCE);
 }
 
@@ -512,8 +661,11 @@ void heading_stop(void)
 {
     heading_base_rpm = 0.0f;
     heading_rotation_active = false;
+    heading_rotation_settling = false;
+    heading_rotation_correction = false;
     heading_rotation_direction = 0.0f;
     heading_rotation_start_tick = 0;
+    heading_rotation_settle_tick = 0;
 
     heading_clear_pid();
 

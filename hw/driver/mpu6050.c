@@ -27,6 +27,14 @@
 
 #define MPU6050_I2C_TIMEOUT_MS      100
 
+/* 전원 직후 첫 WHO_AM_I 접근이 너무 빨라지는 것을 막고, 순간적인 NACK/BUSY를
+ * 한 번의 전체 초기화 실패로 확정하지 않기 위한 여유 시간과 재시도 횟수다. */
+#define MPU6050_POWER_STABILIZE_MS    200U
+#define MPU6050_I2C_RETRY_COUNT         3U
+#define MPU6050_I2C_RETRY_DELAY_MS      5U
+#define MPU6050_START_RETRY_COUNT       3U
+#define MPU6050_START_RETRY_DELAY_MS   50U
+
 /* 자이로 영점 보정 시 측정 간격 [ms] */
 #define MPU6050_CALIB_SAMPLE_DELAY_MS   10
 
@@ -48,6 +56,13 @@ extern I2C_HandleTypeDef hi2c1;
 
 
 static bool mpu6050_ready = false;
+
+/* 부팅 로그에서 NACK, BUSY, 잘못된 WHO_AM_I를 구별하기 위한 마지막 실패 정보 */
+static const char *mpu6050_last_error_stage = "none";
+static uint8_t mpu6050_last_who_am_i = 0U;
+static HAL_StatusTypeDef mpu6050_last_hal_status = HAL_OK;
+static uint32_t mpu6050_last_i2c_error = HAL_I2C_ERROR_NONE;
+static HAL_I2C_StateTypeDef mpu6050_last_i2c_state = HAL_I2C_STATE_READY;
 
 /* 마지막으로 측정한 가속도·자이로·온도 값 */
 static mpu6050_data_t mpu6050_last_data;
@@ -103,15 +118,53 @@ static void mpu6050_get_accel_angles(float *roll_deg, float *pitch_deg)
 /* 레지스터를 읽는 내부 함수 */
 static bool mpu6050_read_regs(uint8_t reg, uint8_t *buf, uint16_t len)
 {
-    return (HAL_I2C_Mem_Read(&hi2c1, MPU6050_I2C_ADDR, reg, I2C_MEMADD_SIZE_8BIT,
-                              buf, len, MPU6050_I2C_TIMEOUT_MS) == HAL_OK);
+    uint8_t attempt;
+
+    for (attempt = 0U; attempt < MPU6050_I2C_RETRY_COUNT; attempt++)
+    {
+        mpu6050_last_hal_status = HAL_I2C_Mem_Read(
+            &hi2c1, MPU6050_I2C_ADDR, reg, I2C_MEMADD_SIZE_8BIT,
+            buf, len, MPU6050_I2C_TIMEOUT_MS);
+
+        if (mpu6050_last_hal_status == HAL_OK)
+        {
+            mpu6050_last_i2c_error = HAL_I2C_ERROR_NONE;
+            mpu6050_last_i2c_state = HAL_I2C_GetState(&hi2c1);
+            return true;
+        }
+
+        mpu6050_last_i2c_error = HAL_I2C_GetError(&hi2c1);
+        mpu6050_last_i2c_state = HAL_I2C_GetState(&hi2c1);
+        HAL_Delay(MPU6050_I2C_RETRY_DELAY_MS);
+    }
+
+    return false;
 }
 
 /* 레지스터 1개에 값을 쓰는 내부 함수 */
 static bool mpu6050_write_reg(uint8_t reg, uint8_t value)
 {
-    return (HAL_I2C_Mem_Write(&hi2c1, MPU6050_I2C_ADDR, reg, I2C_MEMADD_SIZE_8BIT,
-                               &value, 1, MPU6050_I2C_TIMEOUT_MS) == HAL_OK);
+    uint8_t attempt;
+
+    for (attempt = 0U; attempt < MPU6050_I2C_RETRY_COUNT; attempt++)
+    {
+        mpu6050_last_hal_status = HAL_I2C_Mem_Write(
+            &hi2c1, MPU6050_I2C_ADDR, reg, I2C_MEMADD_SIZE_8BIT,
+            &value, 1, MPU6050_I2C_TIMEOUT_MS);
+
+        if (mpu6050_last_hal_status == HAL_OK)
+        {
+            mpu6050_last_i2c_error = HAL_I2C_ERROR_NONE;
+            mpu6050_last_i2c_state = HAL_I2C_GetState(&hi2c1);
+            return true;
+        }
+
+        mpu6050_last_i2c_error = HAL_I2C_GetError(&hi2c1);
+        mpu6050_last_i2c_state = HAL_I2C_GetState(&hi2c1);
+        HAL_Delay(MPU6050_I2C_RETRY_DELAY_MS);
+    }
+
+    return false;
 }
 
 /* MPU6050 연결을 확인하고 측정 레지스터를 초기화 */
@@ -123,43 +176,53 @@ bool mpu6050_init(void)
 
     if (!mpu6050_read_regs(MPU6050_REG_WHO_AM_I, &who_am_i, 1))
     {
+        mpu6050_last_error_stage = "WHO_AM_I read";
         return false;
     }
 
+    mpu6050_last_who_am_i = who_am_i;
+
     if (who_am_i != MPU6050_WHO_AM_I_VALUE && who_am_i != MPU6050_WHO_AM_I_VALUE_ALT)
     {
+        mpu6050_last_error_stage = "WHO_AM_I value";
         return false;
     }
 
     /* 절전 모드를 해제하고 내부 클럭을 사용 */
     if (!mpu6050_write_reg(MPU6050_REG_PWR_MGMT_1, 0x00))
     {
+        mpu6050_last_error_stage = "PWR_MGMT_1 write";
         return false;
     }
 
     if (!mpu6050_write_reg(MPU6050_REG_SMPLRT_DIV, 0x07))
     {
+        mpu6050_last_error_stage = "SMPLRT_DIV write";
         return false;
     }
 
     if (!mpu6050_write_reg(MPU6050_REG_CONFIG, 0x03))
     {
+        mpu6050_last_error_stage = "CONFIG write";
         return false;
     }
 
     /* 자이로 풀스케일 ±250 dps */
     if (!mpu6050_write_reg(MPU6050_REG_GYRO_CONFIG, 0x00))
     {
+        mpu6050_last_error_stage = "GYRO_CONFIG write";
         return false;
     }
 
     /* 가속도 풀스케일 ±2g */
     if (!mpu6050_write_reg(MPU6050_REG_ACCEL_CONFIG, 0x00))
     {
+        mpu6050_last_error_stage = "ACCEL_CONFIG write";
         return false;
     }
 
     mpu6050_ready = true;
+    mpu6050_last_error_stage = "none";
 
     return true;
 }
@@ -262,24 +325,77 @@ bool mpu6050_is_ready(void)
 }
 
 /* MPU6050 초기화 + 워밍업 대기 + 자이로 영점 보정을 한 번에 수행.
- * 초기화에 실패하면 워밍업/보정 없이 즉시 false를 반환한다. */
+ * 한 번 실패하면 I2C 주변장치를 다시 시작하고 전체 과정을 재시도한다. */
 bool mpu6050_start(void)
 {
-    if (!mpu6050_init())
+    uint8_t attempt;
+
+    mpu6050_last_error_stage = "none";
+    mpu6050_last_who_am_i = 0U;
+    mpu6050_last_hal_status = HAL_OK;
+    mpu6050_last_i2c_error = HAL_I2C_ERROR_NONE;
+    mpu6050_last_i2c_state = HAL_I2C_GetState(&hi2c1);
+
+    /* MCU보다 센서 전원이 늦게 안정되는 보드에서도 첫 접근이 NACK가 되지 않게 한다. */
+    HAL_Delay(MPU6050_POWER_STABILIZE_MS);
+
+    for (attempt = 0U; attempt < MPU6050_START_RETRY_COUNT; attempt++)
     {
-        return false;
+        if (mpu6050_init())
+        {
+            HAL_Delay(MPU6050_CALIB_WARMUP_TIME);
+
+            if (mpu6050_calibrate_gyro(300) == true)
+            {
+                /* 보정이 끝난 정지 자세를 X/Y/Z의 0도 기준으로 잡는다. */
+                mpu6050_orientation_reset();
+                mpu6050_last_error_stage = "none";
+                return true;
+            }
+
+            mpu6050_last_error_stage = "gyro calibration";
+            mpu6050_ready = false;
+        }
+
+        if ((attempt + 1U) < MPU6050_START_RETRY_COUNT)
+        {
+            /* HAL 내부 BUSY 상태도 함께 지우기 위해 공용 I2C 주변장치를 다시 시작한다.
+             * 호출은 단일 스레드의 부팅/정지 복구 구간에서만 이루어진다. */
+            (void)HAL_I2C_DeInit(&hi2c1);
+            HAL_Delay(MPU6050_I2C_RETRY_DELAY_MS);
+            mpu6050_last_hal_status = HAL_I2C_Init(&hi2c1);
+            mpu6050_last_i2c_error = HAL_I2C_GetError(&hi2c1);
+            mpu6050_last_i2c_state = HAL_I2C_GetState(&hi2c1);
+            HAL_Delay(MPU6050_START_RETRY_DELAY_MS);
+        }
     }
 
-    HAL_Delay(MPU6050_CALIB_WARMUP_TIME);
+    return false;
+}
 
-    if (mpu6050_calibrate_gyro(300) == false)
-    {
-        return false;
-    }
+const char *mpu6050_get_last_error_stage(void)
+{
+    return mpu6050_last_error_stage;
+}
 
-    /* 보정이 끝난 정지 자세를 X/Y/Z의 0도 기준으로 잡는다. */
-    mpu6050_orientation_reset();
-    return true;
+uint8_t mpu6050_get_last_who_am_i(void)
+{
+    return mpu6050_last_who_am_i;
+}
+
+uint32_t mpu6050_get_last_hal_status(void)
+{
+    return (uint32_t)mpu6050_last_hal_status;
+}
+
+uint32_t mpu6050_get_last_i2c_error(void)
+{
+    return mpu6050_last_i2c_error;
+}
+
+uint32_t mpu6050_get_last_i2c_state(void)
+{
+    return (uint32_t)mpu6050_last_i2c_state;
 }
 
 /* 현재 자세를 기준(Roll/Pitch/Yaw = 0도)으로 재설정 */

@@ -9,7 +9,7 @@
 |---|---|---|
 | App | `app/rover_app.c` | 입력을 읽고 제어 모듈을 연결하며 로그를 출력한다. |
 | Mission | `mission_control.c` | 대기·직진·회피·복구·오류 중 현재 상태 하나를 보관한다. |
-| Control | `heading_control.c`, `obstacle_avoidance.c`, `speed_bump_control.c` | 센서값을 실제 주행 명령으로 바꾼다. |
+| Control | `proximity_monitor.c`, `heading_control.c`, `obstacle_avoidance.c`, `speed_bump_control.c` | 센서값을 검증하고 실제 주행 명령으로 바꾼다. |
 | Driver | `drive.c`, `wheel.c`, `motor.c` | 최종 명령을 PWM과 방향 핀 출력으로 바꾼다. |
 | Sensor | `encoder.c`, `mpu6050.c`, `vl53l0x.c`, `ir_remote.c` | 하드웨어에서 측정값과 명령을 읽는다. |
 
@@ -19,8 +19,8 @@
 제어 모듈 → drive → wheel → motor → 실제 모터
 ```
 
-장애물 회전처럼 좌우 출력을 직접 지정해야 할 때도 `motor_set_output()`을 바로
-호출하지 않고 `drive_set_direct_output()`을 사용한다.
+부드러운 장애물 회피는 직접 PWM을 사용하지 않고 `drive_follow_heading()`에 기본
+RPM과 목표 Yaw를 전달한다.
 
 ## 앱과 임무 상태
 
@@ -47,11 +47,12 @@
 
 - `drive_init()` — 모터, 엔코더, 바퀴 제어, 방향 제어를 초기화
 - `drive_forward()` / `drive_stop()` — 정상 주행 시작과 정지
-- `drive_set_speed(rpm)` — 정상 주행의 기본 목표 RPM 설정
+- `drive_set_speed(speed)` — 80~100 주행 단계값을 대응 RPM으로 변환해 설정
 - `drive_update(dt)` — 반드시 반복 호출하여 IMU·엔코더 피드백을 반영
 - `drive_set_direct_output(left, right)` — 회전 등 특수 동작의 직접 출력
-- `drive_get_left_target_rpm()` / `drive_get_right_target_rpm()` — 코드가 요구한 RPM
-- `drive_get_left_actual_rpm()` / `drive_get_right_actual_rpm()` — 엔코더가 측정한 RPM
+- `drive_follow_heading(rpm, yaw)` — 지정 RPM으로 전진하며 연속 목표 Yaw 추종
+- `wheel_get_target_rpm(WHEEL_LEFT/RIGHT)` — 코드가 각 바퀴에 요구한 RPM
+- `wheel_get_rpm(WHEEL_LEFT/RIGHT)` — 엔코더가 측정한 실제 RPM
 
 `drive`는 최종 모터 명령의 단일 통로다. 직접 출력 모드가 켜진 동안에는 방향
 제어기가 모터 출력을 덮어쓰지 않고 자세 측정만 갱신한다.
@@ -62,6 +63,7 @@
 - `heading_update(dt)` — yaw 오차와 바퀴 RPM을 이용해 좌우 목표를 보정
 - `heading_update_measurement(dt)` — 모터 출력 없이 자세값만 갱신
 - `heading_reset_reference()` — 현재 방향을 새로운 0도로 설정
+- `heading_track_target(yaw)` — PID 상태를 지우지 않고 주행 중 목표 Yaw 갱신
 
 ## 센서
 
@@ -91,14 +93,20 @@ EMA는 새 측정값 30%, 기존값 70%를 섞어 한 펄스의 흔들림을 줄
 X·Y는 짧은 순간에 안정적인 자이로와 장시간 기준을 잡는 가속도계를 결합한
 상보 필터를 사용한다. Z(yaw)는 중력으로 보정할 수 없으므로 자이로 적분값이다.
 
-### `vl53l0x`, `ir_remote`
+### `vl53l0x`, `proximity_monitor`, `ir_remote`
 
-- `vl53l0x_read_range()` — 정면 거리와 유효성 상태를 읽는다.
+- `vl53l0x_update()` — LEFT/FRONT/RIGHT의 non-blocking 측정을 진행한다.
+- `proximity_monitor_update()` — 새 결과를 중앙값 필터와 오류·신선도 상태에 반영한다.
+- `proximity_monitor_get_snapshot()` — 세 거리, 측정 순번, 건강 상태를 한 번에 반환한다.
 - `ir_remote_update()` — 캡처한 NEC 신호를 명령으로 해석한다.
 - `ir_remote_get_command()` — 새 명령이 있을 때만 반환한다.
 
 ## 공통 물리 설정
 
-바퀴 지름, 엔코더 슬롯 수, RPM 범위처럼 여러 모듈이 함께 알아야 하는 값은
+바퀴 지름, 엔코더 슬롯 수, RPM 범위, 장애물 거리와 각도처럼 여러 모듈이
+함께 알아야 하는 값은
 `hw/rover_config.h`에서 한 번만 정의한다. 모터나 바퀴를 교체했을 때 여러 C 파일의
 숫자를 따로 고치지 않는다.
+
+회피 상태와 모든 튜닝값의 의미는 [smooth-obstacle-avoidance.md](smooth-obstacle-avoidance.md)를
+기준으로 한다.

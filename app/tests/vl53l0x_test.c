@@ -70,8 +70,8 @@ static void vl53l0x_test_print_status(void)
 
 void vl53l0x_test_init(void)
 {
-    /* VL53L0X_MULTI_SENSOR_ENABLE == 0이면 FRONT만 ready가 되고,
-     * 1이면 LEFT/FRONT/RIGHT가 각각 독립 상태머신으로 ready가 된다. */
+    /* 현재 3센서 설정에서는 LEFT/FRONT/RIGHT가 각각 고유 주소와
+     * 독립 non-blocking 측정 상태머신을 가진다. */
     vl53l0x_init_all();
 
     vl53l0x_test_print_tick = HAL_GetTick();

@@ -39,6 +39,10 @@ void heading_rotate(float delta_deg);
 // 기준 방향을 절대 각도로 설정한다.
 void heading_set_target(float target_deg);
 
+/* 주행 중 목표 Yaw를 조금씩 바꿀 때 사용한다. 기존 PID 누적값을 지우지 않아
+ * obstacle_avoidance가 만드는 연속 목표를 부드럽게 따라간다. */
+void heading_track_target(float target_deg);
+
 // 현재 기준 방향을 반환한다.
 float heading_get_target(void);
 
@@ -66,6 +70,15 @@ bool heading_is_enabled(void);
 
 // MPU6050 초기화와 가장 최근 자세 갱신이 정상인지 반환한다.
 bool heading_is_sensor_ready(void);
+
+// 제자리 회전 제어기가 현재 모터를 구동 중인지 반환한다.
+bool heading_is_rotation_active(void);
+
+// 목표 통과 후 회전 관성이 가라앉기를 기다리는 중인지 반환한다.
+bool heading_is_rotation_settling(void);
+
+// 정지 관성을 고려한 제자리 회전 허용 범위 안인지 반환한다.
+bool heading_is_rotation_aligned(void);
 
 // 현재 방향이 기준 방향에 충분히 가까운지 반환한다.
 bool heading_is_aligned(void);

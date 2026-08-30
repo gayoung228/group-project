@@ -25,6 +25,9 @@ void wheel_set_target_rpm(wheel_t wheel, float target_rpm);
 // 좌우 바퀴의 목표 회전 속도를 한 번에 설정한다.
 void wheel_set_target_rpm_both(float left_rpm, float right_rpm);
 
+// 회전 미세 보정처럼 100% 시동 출력 없이 좌우 목표 RPM을 설정
+void wheel_set_target_rpm_both_no_kick(float left_rpm, float right_rpm);
+
 // 선택한 바퀴에 설정된 목표 RPM을 반환한다.
 float wheel_get_target_rpm(wheel_t wheel);
 
@@ -52,7 +55,7 @@ bool wheel_is_reached(wheel_t wheel);
 // 출발 시간 내에 양쪽 엔코더가 모두 감지되지 않았는지 반환
 bool wheel_has_startup_fault(void);
 
-// 주행 중 저RPM 5초 감지로 시동 시퀀스를 재실행한 횟수
+// 주행 중 저RPM 2초 감지로 시동 시퀀스를 재실행한 횟수
 uint32_t wheel_get_stall_restart_count(void);
 
 // 좌우 바퀴를 모두 정지시키고 PID 누적 상태를 초기화한다.

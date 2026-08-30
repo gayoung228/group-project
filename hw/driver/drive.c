@@ -35,6 +35,20 @@ static bool drive_direct_mode = false;
 static uint8_t drive_speed = DRIVE_SPEED_NORMAL;
 
 
+/* 같은 절대 Yaw 목표를 반복 적용하는지 판단한다. 제자리 회전 명령이 매 제어
+ * 주기 들어와도 PID와 회전 제한시간이 계속 초기화되지 않게 한다. */
+static bool drive_same_heading(float first_deg, float second_deg)
+{
+    float difference = first_deg - second_deg;
+
+    while (difference > 180.0f)  { difference -= 360.0f; }
+    while (difference < -180.0f) { difference += 360.0f; }
+    if (difference < 0.0f)       { difference = -difference; }
+
+    return (difference <= 0.1f);
+}
+
+
 /* 0~100 의 듀티 값을 목표 RPM 으로 바꿔주는 내부 함수
  * 최소 구동 듀티와 최대 듀티 사이를 직선으로 잇는다. */
 float drive_speed_to_rpm(uint8_t duty)
@@ -56,10 +70,20 @@ float drive_speed_to_rpm(uint8_t duty)
         duty = 100;
     }
 
-    ratio = (float)(duty - DRIVE_DUTY_MIN) / (float)(100 - DRIVE_DUTY_MIN);
+    /* 리모컨의 세 단계가 실측 목표 65/70/78RPM에 정확히 대응하도록
+     * 80~90%와 90~100% 구간을 따로 보간한다. */
+    if (duty <= DRIVE_SPEED_NORMAL)
+    {
+        ratio = (float)(duty - DRIVE_SPEED_SLOW)
+              / (float)(DRIVE_SPEED_NORMAL - DRIVE_SPEED_SLOW);
+        return ROVER_DRIVE_RPM_MIN
+             + ((ROVER_DRIVE_RPM_NORMAL - ROVER_DRIVE_RPM_MIN) * ratio);
+    }
 
-    return DRIVE_RPM_MIN
-         + (DRIVE_RPM_MAX - DRIVE_RPM_MIN) * ratio;
+    ratio = (float)(duty - DRIVE_SPEED_NORMAL)
+          / (float)(DRIVE_SPEED_FAST - DRIVE_SPEED_NORMAL);
+    return ROVER_DRIVE_RPM_NORMAL
+         + ((ROVER_DRIVE_RPM_MAX - ROVER_DRIVE_RPM_NORMAL) * ratio);
 }
 
 /* 일시적인 전진 목표 RPM을 적용한다.
@@ -94,6 +118,32 @@ void drive_set_forward_target_rpm(float target_rpm)
     heading_set_base_rpm(target_rpm);
 }
 
+/* 부드러운 장애물 회피용 폐루프 주행 진입점.
+ * Yaw PID가 좌우 목표 RPM 차이를 만들고 wheel PID가 실제 RPM을 맞춘다. */
+void drive_follow_heading(float target_rpm, float target_heading_deg)
+{
+    if (drive_is_ready() == false)
+    {
+        drive_stop();
+        return;
+    }
+
+    if (target_rpm < ROVER_DRIVE_RPM_MIN)
+    {
+        target_rpm = ROVER_DRIVE_RPM_MIN;
+    }
+    if (target_rpm > ROVER_DRIVE_RPM_MAX)
+    {
+        target_rpm = ROVER_DRIVE_RPM_MAX;
+    }
+
+    drive_direct_mode = false;
+    drive_active = true;
+    heading_set_enabled(true);
+    heading_set_base_rpm(target_rpm);
+    heading_track_target(target_heading_deg);
+}
+
 /* 좌우 출력을 직접 정하는 회피 제어도 최종 하드웨어 접근은 drive가 담당한다. */
 void drive_set_direct_output(int16_t left_output, int16_t right_output)
 {
@@ -121,17 +171,37 @@ void drive_set_direct_output(int16_t left_output, int16_t right_output)
 /* 원래 진행 방향으로 복귀하기 위한 자이로 제자리 회전 명령 */
 void drive_recover_heading(float target_heading_deg)
 {
+    bool continuing_same_rotation;
+    bool same_rotation_target;
+
     if (drive_is_ready() == false)
     {
         drive_stop();
         return;
     }
 
+    same_rotation_target = drive_active
+                        && (drive_direct_mode == false)
+                        && (heading_get_base_rpm() == 0.0f)
+                        && drive_same_heading(target_heading_deg,
+                                              heading_get_target());
+
+    /* 같은 목표를 향해 회전 중이거나 허용 범위 안에서 정지했다면 PID를 유지한다.
+     * 목표를 크게 지나쳐 허용 범위 밖에서 멈췄다면 같은 목표라도 다시 활성화한다. */
+    continuing_same_rotation = same_rotation_target
+                            && (heading_is_rotation_active()
+                                || heading_is_rotation_settling()
+                                || heading_is_rotation_aligned());
+
     drive_direct_mode = false;
     drive_active = true;
     heading_set_enabled(true);
     heading_set_base_rpm(0.0f);
-    heading_set_target(target_heading_deg);
+
+    if (continuing_same_rotation == false)
+    {
+        heading_set_target(target_heading_deg);
+    }
 }
 
 /* 모터의 방향과 속도를 부호 있는 값 하나로 합쳐서 돌려주는 내부 함수 */
