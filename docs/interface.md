@@ -50,12 +50,17 @@ RPM과 목표 Yaw를 전달한다.
 - `drive_set_speed(speed)` — 80~100 주행 단계값을 대응 RPM으로 변환해 설정
 - `drive_update(dt)` — 반드시 반복 호출하여 IMU·엔코더 피드백을 반영
 - `drive_set_direct_output(left, right)` — 회전 등 특수 동작의 직접 출력
+- `drive_set_raw_output(left, right)` — 센서와 PID를 우회하는 모터 단독 시험 출력
+- `drive_is_raw_output_mode()` — raw 모터 시험 활성 여부
 - `drive_follow_heading(rpm, yaw)` — 지정 RPM으로 전진하며 연속 목표 Yaw 추종
 - `wheel_get_target_rpm(WHEEL_LEFT/RIGHT)` — 코드가 각 바퀴에 요구한 RPM
 - `wheel_get_rpm(WHEEL_LEFT/RIGHT)` — 엔코더가 측정한 실제 RPM
 
 `drive`는 최종 모터 명령의 단일 통로다. 직접 출력 모드가 켜진 동안에는 방향
 제어기가 모터 출력을 덮어쓰지 않고 자세 측정만 갱신한다.
+
+raw 출력은 일반 직접 출력과 다르다. 자이로·엔코더·거리센서 판정을 모두 우회하며,
+엔코더가 준비된 경우에도 RPM 로그만 갱신한다. 반드시 `drive_stop()`으로 종료한다.
 
 ### `heading_control`
 

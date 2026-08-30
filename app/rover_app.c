@@ -68,6 +68,8 @@
 #define ROVER_IR_SLOW_CMD        0x30U
 #define ROVER_IR_NORMAL_CMD      0x18U
 #define ROVER_IR_FAST_CMD        0x7AU
+/* 일반 21키 NEC 리모컨의 `100+` 버튼. 현재 디코더의 비트 순서 기준값이다. */
+#define ROVER_IR_RAW_POWER_CMD   0x98U
 
 
 extern UART_HandleTypeDef huart2;
@@ -198,6 +200,11 @@ static void print_distance_init_error(bool address_initialized)
 /* 주행 로그에서 현재 동작을 한눈에 볼 수 있는 이름을 만든다. */
 static const char *state_name(void)
 {
+    if (drive_is_raw_output_mode() == true)
+    {
+        return "RAW-100";
+    }
+
     if (mission_control_is_avoiding() == false)
     {
         if (bump_yaw_state == BUMP_YAW_PAUSE)
@@ -518,6 +525,7 @@ static void print_help(void)
            (int)drive_speed_to_rpm(DRIVE_SPEED_FAST));
     printf("  d : left/front/right distance\r\n");
     printf("  c : wheel-lift PWM/RPM calibration (press twice)\r\n");
+    printf("  p / IR 100+ : RAW full power forward (L/R PWM 100%%, controls OFF)\r\n");
     printf("  h : help\r\n");
     printf("-----------------------------------------\r\n");
 }
@@ -547,6 +555,21 @@ static void print_status(void)
     float actual_right;
     int16_t output_left;
     int16_t output_right;
+
+    if (drive_is_raw_output_mode() == true)
+    {
+        actual_left = encoder_get_rpm(ENCODER_LEFT);
+        actual_right = encoder_get_rpm(ENCODER_RIGHT);
+        output_left = drive_get_left_speed();
+        output_right = drive_get_right_speed();
+
+        printf("[RUN] RAW-100        | L:%4u F:%4u R:%4u mm | "
+               "control:OFF | actual L:%4d R:%4d RPM | PWM L:%4d R:%4d%%\r\n",
+               read_left_mm(), read_front_mm(), read_right_mm(),
+               (int)actual_left, (int)actual_right,
+               (int)output_left, (int)output_right);
+        return;
+    }
 
     (void)heading_get_pose(&pose_x, &pose_y, &pose_z);
 
@@ -709,6 +732,13 @@ static bool update_obstacle_flow(uint32_t dt)
 static void control_step(uint32_t dt)
 {
     bool bump_was_active;
+
+    /* raw PWM 시험은 어떤 주행 제어기도 출력을 덮어쓰지 못하게 가장 먼저 분리한다. */
+    if (drive_is_raw_output_mode() == true)
+    {
+        drive_update(dt);
+        return;
+    }
 
     if (wheel_calibration_is_active() == true)
     {
@@ -886,6 +916,13 @@ static void start_driving(const char *source)
 {
     uint32_t now;
 
+    /* raw 시험 중 START가 들어오면 먼저 100% 출력을 끄고 정상 출발 검사를 한다. */
+    if (drive_is_raw_output_mode() == true)
+    {
+        drive_stop();
+        printf("\r\n[RAW] Full-power output stopped before normal START\r\n");
+    }
+
     if (wheel_calibration_is_armed() || wheel_calibration_is_active())
     {
         printf("\r\n[START BLOCKED] Wheel calibration is armed/running. Press X to cancel.\r\n");
@@ -982,6 +1019,31 @@ static void start_driving(const char *source)
     fault_recovery_ready = false;
     fault_heading_reference_set = false;
     fault_recovery_failed = false;
+}
+
+/* 모든 자율주행 제어를 끄고 모터 두 개에 전진 100% PWM을 직접 적용한다. */
+static void start_raw_full_power(void)
+{
+    if (wheel_calibration_is_armed() || wheel_calibration_is_active())
+    {
+        wheel_calibration_cancel();
+    }
+
+    mission_control_stop();
+    obstacle_avoidance_reset();
+    speed_bump_control_reset();
+    reset_bump_yaw_recovery();
+    drive_stop();
+
+    if (drive_set_raw_output(100, 100) == false)
+    {
+        printf("\r\n[ERROR][RAW] Motor PWM hardware is not ready\r\n");
+        return;
+    }
+
+    printf("\r\n[COMMAND] RAW FULL POWER -> L:100 R:100 PWM\r\n");
+    printf("[WARNING] Heading/PID/avoidance/bump/distance safety controls are OFF\r\n");
+    printf("[ACTION] Press X or the IR STOP button to stop immediately\r\n");
 }
 
 /* UART 로 들어온 한 글자를 명령으로 처리하는 내부 함수 */
@@ -1131,6 +1193,11 @@ static void handle_command(uint8_t ch)
             print_distance();
             break;
 
+        case 'p':
+        case 'P':
+            start_raw_full_power();
+            break;
+
         case 'h':
         case 'H':
             print_help();
@@ -1168,7 +1235,8 @@ static void poll_ir_remote(void)
 
     if (addr != ROVER_IR_ADDR)
     {
-        printf("\r\n[ERROR][REMOTE] Unknown remote address\r\n");
+        printf("\r\n[ERROR][REMOTE] Unknown address=0x%02X cmd=0x%02X\r\n",
+               addr, cmd);
         return;
     }
 
@@ -1204,8 +1272,13 @@ static void poll_ir_remote(void)
             handle_command('3');
             break;
 
+        case ROVER_IR_RAW_POWER_CMD:
+            handle_command('p');
+            break;
+
         default:
-            printf("\r\n[ERROR][REMOTE] Unmapped button\r\n");
+            printf("\r\n[REMOTE] Unmapped button addr=0x%02X cmd=0x%02X\r\n",
+                   addr, cmd);
             break;
     }
 }
@@ -1352,7 +1425,8 @@ void rover_app_run(void)
         {
             print_tick = now;
 
-            if (mission_control_is_running() == true)
+            if ((mission_control_is_running() == true)
+                || (drive_is_raw_output_mode() == true))
             {
                 print_status();
             }

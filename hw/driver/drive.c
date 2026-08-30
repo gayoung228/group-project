@@ -30,6 +30,7 @@ static uint32_t drive_wheel_accum = 0;
 static bool drive_active = false;
 static bool drive_initialized = false;
 static bool drive_direct_mode = false;
+static bool drive_raw_output_mode = false;
 
 /* 현재 설정된 기본 주행 속도 [PWM %] */
 static uint8_t drive_speed = DRIVE_SPEED_NORMAL;
@@ -113,6 +114,7 @@ void drive_set_forward_target_rpm(float target_rpm)
     }
 
     drive_direct_mode = false;
+    drive_raw_output_mode = false;
     drive_active = true;
     heading_set_enabled(true);
     heading_set_base_rpm(target_rpm);
@@ -138,6 +140,7 @@ void drive_follow_heading(float target_rpm, float target_heading_deg)
     }
 
     drive_direct_mode = false;
+    drive_raw_output_mode = false;
     drive_active = true;
     heading_set_enabled(true);
     heading_set_base_rpm(target_rpm);
@@ -162,10 +165,34 @@ void drive_set_direct_output(int16_t left_output, int16_t right_output)
     }
 
     drive_direct_mode = true;
+    drive_raw_output_mode = false;
     drive_active = true;
 
     motor_set_output(MOTOR_LEFT, left_output);
     motor_set_output(MOTOR_RIGHT, right_output);
+}
+
+/* 모터와 PWM 하드웨어만 사용해 좌우 출력을 그대로 적용한다.
+ * heading_stop()으로 자이로 제어와 wheel PID 목표를 먼저 완전히 지운다. */
+bool drive_set_raw_output(int16_t left_output, int16_t right_output)
+{
+    if (motor_is_ready() == false)
+    {
+        drive_stop();
+        return false;
+    }
+
+    drive_active = false;
+    drive_direct_mode = false;
+    drive_raw_output_mode = false;
+    drive_wheel_accum = 0U;
+    heading_set_enabled(false);
+    heading_stop();
+
+    drive_raw_output_mode = true;
+    motor_set_output(MOTOR_LEFT, left_output);
+    motor_set_output(MOTOR_RIGHT, right_output);
+    return true;
 }
 
 /* 원래 진행 방향으로 복귀하기 위한 자이로 제자리 회전 명령 */
@@ -194,6 +221,7 @@ void drive_recover_heading(float target_heading_deg)
                                 || heading_is_rotation_aligned());
 
     drive_direct_mode = false;
+    drive_raw_output_mode = false;
     drive_active = true;
     heading_set_enabled(true);
     heading_set_base_rpm(0.0f);
@@ -246,6 +274,7 @@ bool drive_init(void)
     drive_wheel_accum = 0;
     drive_active = false;
     drive_direct_mode = false;
+    drive_raw_output_mode = false;
     drive_speed = DRIVE_SPEED_NORMAL;
 
     drive_stop();
@@ -260,6 +289,7 @@ bool drive_retry_heading_init(void)
 
     drive_active = false;
     drive_direct_mode = false;
+    drive_raw_output_mode = false;
     drive_wheel_accum = 0;
     wheel_stop();
 
@@ -283,6 +313,7 @@ bool drive_retry_motion_hardware(void)
     drive_stop();
     drive_active = false;
     drive_direct_mode = false;
+    drive_raw_output_mode = false;
     drive_wheel_accum = 0;
 
     motor_initialized = motor_restart();
@@ -326,6 +357,7 @@ bool drive_is_heading_ready(void)
 void drive_prepare_start(void)
 {
     drive_active = false;
+    drive_raw_output_mode = false;
     drive_wheel_accum = 0;
     wheel_reset();
     heading_stop();
@@ -335,6 +367,23 @@ void drive_prepare_start(void)
  * 자이로는 매번, 바퀴 속도 제어는 누적 시간이 찼을 때만 갱신한다. */
 void drive_update(uint32_t elapsed_time_ms)
 {
+    if (drive_raw_output_mode == true)
+    {
+        /* raw 모드에서는 자이로와 PID를 호출하지 않는다. 엔코더가 준비된 경우에만
+         * 실제 RPM을 로그로 볼 수 있도록 측정값만 갱신한다. */
+        drive_wheel_accum += elapsed_time_ms;
+        if (drive_wheel_accum >= DRIVE_WHEEL_PERIOD_MS)
+        {
+            if (encoder_is_ready(ENCODER_LEFT)
+                && encoder_is_ready(ENCODER_RIGHT))
+            {
+                encoder_update(drive_wheel_accum);
+            }
+            drive_wheel_accum = 0U;
+        }
+        return;
+    }
+
     if (drive_direct_mode == true)
     {
         /* 회피 중에는 자세만 읽고 heading/wheel이 직접 출력을 덮지 않는다. */
@@ -419,6 +468,7 @@ void drive_forward(uint8_t speed)
 
     drive_speed = speed;
     drive_direct_mode = false;
+    drive_raw_output_mode = false;
     drive_active = true;
 
     heading_set_enabled(true);
@@ -436,6 +486,7 @@ void drive_backward(uint8_t speed)
 
     drive_speed = speed;
     drive_direct_mode = false;
+    drive_raw_output_mode = false;
     drive_active = true;
 
     heading_set_enabled(true);
@@ -453,6 +504,7 @@ void drive_rotate(float delta_deg)
     }
 
     drive_direct_mode = false;
+    drive_raw_output_mode = false;
     drive_active = true;
 
     heading_set_enabled(true);
@@ -481,6 +533,7 @@ void drive_stop(void)
 {
     drive_active = false;
     drive_direct_mode = false;
+    drive_raw_output_mode = false;
     heading_set_enabled(false);
     heading_stop();
 }
@@ -534,4 +587,10 @@ int16_t drive_get_right_speed(void)
 bool drive_is_direct_mode(void)
 {
     return drive_direct_mode;
+}
+
+/* 모터 단독 raw PWM 시험이 활성화됐는지 반환한다. */
+bool drive_is_raw_output_mode(void)
+{
+    return drive_raw_output_mode;
 }

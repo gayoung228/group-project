@@ -56,6 +56,11 @@ void drive_follow_heading(float target_rpm, float target_heading_deg);
  * drive를 통해 -100~100 출력 명령을 적용한다. */
 void drive_set_direct_output(int16_t left_output, int16_t right_output);
 
+/* 자이로·바퀴 PID·주행 안전판정을 모두 우회하고 모터 PWM을 직접 적용한다.
+ * 모터 단독 시험 전용이며 drive_stop()으로 즉시 해제한다. */
+bool drive_set_raw_output(int16_t left_output, int16_t right_output);
+bool drive_is_raw_output_mode(void);
+
 // 현재 위치에서 지정한 절대 Yaw 목표로 제자리 회전을 시작한다.
 void drive_recover_heading(float target_heading_deg);
 
