@@ -28,7 +28,21 @@ bool vl53l0x_init_sensor(vl53l0x_id_t sensor, uint8_t new_address);
 
 bool vl53l0x_init_all(void);  // 전방·좌측·우측 센서를 순차적으로 활성화하고 주소를 설정
 
+// 마지막 다중 센서 초기화 실패 위치와 HAL I2C 상태를 반환한다.
+vl53l0x_id_t vl53l0x_get_last_init_sensor(void);
+const char *vl53l0x_get_last_init_stage(void);
+uint8_t vl53l0x_get_last_init_attempt(void);
+uint32_t vl53l0x_get_last_hal_status(void);
+uint32_t vl53l0x_get_last_i2c_error(void);
+uint32_t vl53l0x_get_last_i2c_state(void);
+
 bool vl53l0x_update_sensor(vl53l0x_id_t sensor);  // 선택한 센서의 거리값을 한 번 측정하고 저장
+
+// non-blocking 측정이 실제로 완료된 경우에만 한 번 true를 반환
+bool vl53l0x_take_new_measurement(vl53l0x_id_t sensor);
+
+// I2C 실패 또는 측정 timeout이 새로 발생한 경우에만 한 번 true를 반환
+bool vl53l0x_take_measurement_error(vl53l0x_id_t sensor);
 
 void vl53l0x_update(void);  // 세 센서를 순차적으로 측정하여 거리값을 갱신
 

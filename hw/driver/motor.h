@@ -1,6 +1,7 @@
 #ifndef MOTOR_H
 #define MOTOR_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 typedef enum
@@ -17,7 +18,14 @@ typedef enum
 } motor_direction_t;
 
 // 모터 방향 핀을 정지 상태로 만들고 좌우 PWM을 시작한다.
-void motor_init(void);
+// 양쪽 PWM 타이머가 정상적으로 시작되면 true를 반환한다.
+bool motor_init(void);
+
+// 모터를 긴급 정지한 뒤 좌우 PWM 채널을 실제로 다시 시작한다.
+bool motor_restart(void);
+
+// 모터 드라이버 초기화 결과를 반환한다.
+bool motor_is_ready(void);
 
 // 선택한 모터의 회전 방향을 설정한다.
 void motor_set_direction(motor_t motor, motor_direction_t direction);

@@ -3,63 +3,90 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "proximity_monitor.h"
 
+/* 회피 방향은 이벤트를 시작할 때 한 번 선택해 고정(latch)한다. */
 typedef enum
 {
-    AVOID_DIRECTION_NONE,     // 회피 방향이 결정되지 않은 상태
-    AVOID_DIRECTION_LEFT,     // 왼쪽 방향으로 장애물 회피
-    AVOID_DIRECTION_RIGHT     // 오른쪽 방향으로 장애물 회피
+    AVOID_DIRECTION_NONE = 0,
+    AVOID_DIRECTION_LEFT,
+    AVOID_DIRECTION_RIGHT
 } avoid_direction_t;
 
+/* 부드러운 회피의 각 단계. 상태가 바뀔 때만 판단 기준도 함께 바뀌므로
+ * 센서 노이즈가 곧바로 서로 반대되는 모터 명령을 만들지 않는다. */
 typedef enum
 {
-    AVOID_STATE_IDLE,              // 장애물 회피 대기
-    AVOID_STATE_STOP,              // 장애물 앞에서 정지
-    AVOID_STATE_CHECK_SPACE,       // 회피 방향과 90도 목표 각도 준비
-    AVOID_STATE_FIRST_TURN,        // 회피 방향으로 첫 번째 90도 회전
-    AVOID_STATE_FORWARD,           // 장애물 옆으로 설정 거리만큼 전진
-    AVOID_STATE_SECOND_TURN,       // 원래 진행 방향으로 두 번째 90도 회전
-    AVOID_STATE_COMPLETED,         // 장애물 회피 완료
-    AVOID_STATE_FAILED             // 장애물 회피 실패
+    AVOID_STATE_IDLE = 0,
+    AVOID_STATE_TURN_OUT,
+    AVOID_STATE_CURVE_OUT,
+    AVOID_STATE_FOLLOW_EDGE,
+    AVOID_STATE_ALIGN_OPENING,
+    AVOID_STATE_CLEAR_BODY,
+    AVOID_STATE_RETURN_ORIGINAL,
+    AVOID_STATE_SAFETY_STOP,
+    AVOID_STATE_SAFETY_TURN,
+    AVOID_STATE_SAFETY_ADVANCE,
+    AVOID_STATE_COMPLETED,
+    AVOID_STATE_FAILED
 } avoid_state_t;
+
+/* 실패 원인은 앱이 사용자 로그와 최종 정지 이유를 구분할 때 사용한다. */
+typedef enum
+{
+    AVOID_FAILURE_NONE = 0,
+    AVOID_FAILURE_NO_DIRECTION,
+    AVOID_FAILURE_SENSOR,
+    AVOID_FAILURE_ESCAPE_BLOCKED,
+    AVOID_FAILURE_TIMEOUT,
+    AVOID_FAILURE_MAX_TRAVEL
+} avoid_failure_t;
+
+/* 회피 모듈은 하드웨어를 직접 만지지 않고 이 명령만 계산한다.
+ * TRACK_HEADING이면 drive가 자이로 목표를 바퀴 RPM PID로 변환한다. */
+typedef enum
+{
+    AVOID_MOTION_STOP = 0,
+    AVOID_MOTION_TRACK_HEADING,
+    AVOID_MOTION_ROTATE_HEADING
+} avoid_motion_t;
 
 typedef struct
 {
-    uint16_t obstacle_distance_mm;    // 장애물로 판단할 전방 거리
-    uint16_t bypass_distance_mm;      // 회피 방향으로 전진할 거리
-    uint8_t forward_speed;            // 회피 중 전진 속도
-    uint8_t turn_speed;               // 회피 중 회전 속도
-    float turn_angle_deg;             // 한 번 회전할 목표 각도
-} obstacle_avoidance_config_t;
+    avoid_motion_t motion;
+    float base_rpm;
+    float target_heading_deg;
+} obstacle_avoidance_command_t;
 
-void obstacle_avoidance_init(void); // 장애물 회피 상태 머신을 초기화
+/* 모든 상태·카운터·방향 래치를 초기화한다. 튜닝값은 rover_config.h를 사용한다. */
+void obstacle_avoidance_init(void);
 
-void obstacle_avoidance_reset(void);  // 진행 중인 장애물 회피를 취소하고 대기 상태로 전환
+/* 진행 중인 회피를 취소하고 다음 장애물 감지 대기 상태로 돌아간다. */
+void obstacle_avoidance_reset(void);
 
-void obstacle_avoidance_set_config(const obstacle_avoidance_config_t *config);  // 장애물 거리와 회피 동작 설정값을 변경
+/* 최신 3센서 스냅샷, 자이로 Yaw, 누적 이동거리로 상태와 주행 명령을 갱신한다. */
+void obstacle_avoidance_update(const proximity_snapshot_t *sensors,
+                               float current_heading_deg,
+                               float current_distance_mm,
+                               uint32_t elapsed_time_ms);
 
-  // 좌우 거리 중 공간이 더 넓은 회피 방향을 반환
-avoid_direction_t obstacle_avoidance_select_direction(uint16_t left_distance_mm,uint16_t right_distance_mm);
+/* 이번 호출 흐름에서 새 회피 이벤트가 시작됐을 때 한 번만 true를 반환한다. */
+bool obstacle_avoidance_take_started(void);
 
-// 선택한 방향으로 장애물 회피 동작을 시작
-bool obstacle_avoidance_start(avoid_direction_t direction, float current_heading_deg, float current_distance_mm);  
+/* 상태가 바뀌었을 때 한 번만 true를 반환하고 바뀐 현재 상태를 복사한다. */
+bool obstacle_avoidance_take_state_change(avoid_state_t *state);
 
+/* 앱이 drive에 전달할 현재 정지/자이로 추종 명령을 복사한다. */
+void obstacle_avoidance_get_command(obstacle_avoidance_command_t *command);
 
-// 현재 방향과 이동 거리를 이용해 회피 상태를 갱신
-void obstacle_avoidance_update(float current_heading_deg, float current_distance_mm, uint16_t front_distance_mm); 
-
-avoid_state_t obstacle_avoidance_get_state(void);  // 현재 장애물 회피 단계를 반환
-
-avoid_direction_t obstacle_avoidance_get_direction(void);  // 현재 선택된 회피 방향을 반환
-
-int16_t obstacle_avoidance_get_left_speed(void);  // 회피 동작에 필요한 왼쪽 모터 목표 속도를 반환
-
-int16_t obstacle_avoidance_get_right_speed(void);  // 회피 동작에 필요한 오른쪽 모터 목표 속도를 반환
-
-bool obstacle_avoidance_is_running(void);  // 장애물 회피 동작이 진행 중인지 반환
-
-bool obstacle_avoidance_is_completed(void);  // 장애물 회피가 정상적으로 완료됐는지 반환
-
-bool obstacle_avoidance_has_failed(void);  // 장애물 회피가 실패했는지 반환
+/* 로그와 미션 제어에 필요한 읽기 전용 상태 접근 함수 */
+avoid_state_t obstacle_avoidance_get_state(void);
+avoid_direction_t obstacle_avoidance_get_direction(void);
+avoid_failure_t obstacle_avoidance_get_failure(void);
+bool obstacle_avoidance_is_running(void);
+bool obstacle_avoidance_is_completed(void);
+bool obstacle_avoidance_has_failed(void);
+bool obstacle_avoidance_inside_obstacle_seen(void);
+const char *obstacle_avoidance_state_name(avoid_state_t state);
 
 #endif

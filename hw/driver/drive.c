@@ -4,6 +4,7 @@
 #include "wheel.h"
 #include "motor.h"
 #include "encoder.h"
+#include "rover_config.h"
 
 /* ------------------------------------------------------------------
  * drive.c - 차량 단위 주행 명령
@@ -15,11 +16,7 @@
  * ------------------------------------------------------------------ */
 
 /* 실제로 바퀴가 돌기 시작하는 최소 PWM [%] */
-#define DRIVE_DUTY_MIN          80
-
-/* 듀티를 RPM 으로 바꾸기 위한 실측 기준값 */
-#define DRIVE_RPM_AT_MIN_DUTY    90.0f   /* 80% 에서 나온 RPM */
-#define DRIVE_RPM_AT_MAX_DUTY   150.0f   /* 100% 에서 나온 RPM */
+#define DRIVE_DUTY_MIN          ROVER_MOTOR_MIN_OUTPUT
 
 /* 회전 명령 한 번에 돌릴 각도 [도] */
 #define DRIVE_TURN_STEP_DEG     90.0f
@@ -27,27 +24,35 @@
 /* wheel PID 주기 [ms] : 엔코더 분해능 때문에 heading 보다 길어야 한다 */
 #define DRIVE_WHEEL_PERIOD_MS   100
 
-/* ★ encoder.c 의 ENCODER_SLOTS_PER_REV 과 같은 값이어야 한다 ★ */
-#define DRIVE_SLOTS_PER_REV     20
-
-/* 바퀴 지름 [mm] */
-#define DRIVE_WHEEL_DIA_MM      66.0f
-
-#define DRIVE_PI                3.141592f
-
-
 static uint32_t drive_wheel_accum = 0;
 
 /* false인 동안에는 제어기 상태와 관계없이 모터 출력을 강제로 0으로 유지한다. */
 static bool drive_active = false;
+static bool drive_initialized = false;
+static bool drive_direct_mode = false;
+static bool drive_raw_output_mode = false;
 
 /* 현재 설정된 기본 주행 속도 [PWM %] */
 static uint8_t drive_speed = DRIVE_SPEED_NORMAL;
 
 
+/* 같은 절대 Yaw 목표를 반복 적용하는지 판단한다. 제자리 회전 명령이 매 제어
+ * 주기 들어와도 PID와 회전 제한시간이 계속 초기화되지 않게 한다. */
+static bool drive_same_heading(float first_deg, float second_deg)
+{
+    float difference = first_deg - second_deg;
+
+    while (difference > 180.0f)  { difference -= 360.0f; }
+    while (difference < -180.0f) { difference += 360.0f; }
+    if (difference < 0.0f)       { difference = -difference; }
+
+    return (difference <= 0.1f);
+}
+
+
 /* 0~100 의 듀티 값을 목표 RPM 으로 바꿔주는 내부 함수
  * 최소 구동 듀티와 최대 듀티 사이를 직선으로 잇는다. */
-static float drive_duty_to_rpm(uint8_t duty)
+float drive_speed_to_rpm(uint8_t duty)
 {
     float ratio;
 
@@ -66,10 +71,165 @@ static float drive_duty_to_rpm(uint8_t duty)
         duty = 100;
     }
 
-    ratio = (float)(duty - DRIVE_DUTY_MIN) / (float)(100 - DRIVE_DUTY_MIN);
+    /* 리모컨의 세 단계가 실측 목표 65/70/78RPM에 정확히 대응하도록
+     * 80~90%와 90~100% 구간을 따로 보간한다. */
+    if (duty <= DRIVE_SPEED_NORMAL)
+    {
+        ratio = (float)(duty - DRIVE_SPEED_SLOW)
+              / (float)(DRIVE_SPEED_NORMAL - DRIVE_SPEED_SLOW);
+        return ROVER_DRIVE_RPM_MIN
+             + ((ROVER_DRIVE_RPM_NORMAL - ROVER_DRIVE_RPM_MIN) * ratio);
+    }
 
-    return DRIVE_RPM_AT_MIN_DUTY
-         + (DRIVE_RPM_AT_MAX_DUTY - DRIVE_RPM_AT_MIN_DUTY) * ratio;
+    ratio = (float)(duty - DRIVE_SPEED_NORMAL)
+          / (float)(DRIVE_SPEED_FAST - DRIVE_SPEED_NORMAL);
+    return ROVER_DRIVE_RPM_NORMAL
+         + ((ROVER_DRIVE_RPM_MAX - ROVER_DRIVE_RPM_NORMAL) * ratio);
+}
+
+/* 일시적인 전진 목표 RPM을 적용한다.
+ * 사용자가 선택한 slow/normal/fast 단계는 바꾸지 않으므로
+ * 방지턱 통과 후 drive_set_speed()로 원래 속도를 복구할 수 있다. */
+void drive_set_forward_target_rpm(float target_rpm)
+{
+    if (drive_is_ready() == false)
+    {
+        drive_stop();
+        return;
+    }
+
+    if (target_rpm < 0.0f)
+    {
+        target_rpm = 0.0f;
+    }
+    if (target_rpm > DRIVE_RPM_MAX)
+    {
+        target_rpm = DRIVE_RPM_MAX;
+    }
+
+    if (target_rpm == 0.0f)
+    {
+        drive_stop();
+        return;
+    }
+
+    drive_direct_mode = false;
+    drive_raw_output_mode = false;
+    drive_active = true;
+    heading_set_enabled(true);
+    heading_set_base_rpm(target_rpm);
+}
+
+/* 부드러운 장애물 회피용 폐루프 주행 진입점.
+ * Yaw PID가 좌우 목표 RPM 차이를 만들고 wheel PID가 실제 RPM을 맞춘다. */
+void drive_follow_heading(float target_rpm, float target_heading_deg)
+{
+    if (drive_is_ready() == false)
+    {
+        drive_stop();
+        return;
+    }
+
+    if (target_rpm < ROVER_DRIVE_RPM_MIN)
+    {
+        target_rpm = ROVER_DRIVE_RPM_MIN;
+    }
+    if (target_rpm > ROVER_DRIVE_RPM_MAX)
+    {
+        target_rpm = ROVER_DRIVE_RPM_MAX;
+    }
+
+    drive_direct_mode = false;
+    drive_raw_output_mode = false;
+    drive_active = true;
+    heading_set_enabled(true);
+    heading_set_base_rpm(target_rpm);
+    heading_track_target(target_heading_deg);
+}
+
+/* 좌우 출력을 직접 정하는 회피 제어도 최종 하드웨어 접근은 drive가 담당한다. */
+void drive_set_direct_output(int16_t left_output, int16_t right_output)
+{
+    if (drive_is_ready() == false)
+    {
+        drive_stop();
+        return;
+    }
+
+    if (drive_direct_mode == false)
+    {
+        /* 폐루프 목표와 PID 누적값이 직접 출력에 섞이지 않게 한 번만 정리한다. */
+        heading_set_enabled(false);
+        heading_stop();
+        drive_wheel_accum = 0;
+    }
+
+    drive_direct_mode = true;
+    drive_raw_output_mode = false;
+    drive_active = true;
+
+    motor_set_output(MOTOR_LEFT, left_output);
+    motor_set_output(MOTOR_RIGHT, right_output);
+}
+
+/* 모터와 PWM 하드웨어만 사용해 좌우 출력을 그대로 적용한다.
+ * heading_stop()으로 자이로 제어와 wheel PID 목표를 먼저 완전히 지운다. */
+bool drive_set_raw_output(int16_t left_output, int16_t right_output)
+{
+    if (motor_is_ready() == false)
+    {
+        drive_stop();
+        return false;
+    }
+
+    drive_active = false;
+    drive_direct_mode = false;
+    drive_raw_output_mode = false;
+    drive_wheel_accum = 0U;
+    heading_set_enabled(false);
+    heading_stop();
+
+    drive_raw_output_mode = true;
+    motor_set_output(MOTOR_LEFT, left_output);
+    motor_set_output(MOTOR_RIGHT, right_output);
+    return true;
+}
+
+/* 원래 진행 방향으로 복귀하기 위한 자이로 제자리 회전 명령 */
+void drive_recover_heading(float target_heading_deg)
+{
+    bool continuing_same_rotation;
+    bool same_rotation_target;
+
+    if (drive_is_ready() == false)
+    {
+        drive_stop();
+        return;
+    }
+
+    same_rotation_target = drive_active
+                        && (drive_direct_mode == false)
+                        && (heading_get_base_rpm() == 0.0f)
+                        && drive_same_heading(target_heading_deg,
+                                              heading_get_target());
+
+    /* 같은 목표를 향해 회전 중이거나 허용 범위 안에서 정지했다면 PID를 유지한다.
+     * 목표를 크게 지나쳐 허용 범위 밖에서 멈췄다면 같은 목표라도 다시 활성화한다. */
+    continuing_same_rotation = same_rotation_target
+                            && (heading_is_rotation_active()
+                                || heading_is_rotation_settling()
+                                || heading_is_rotation_aligned());
+
+    drive_direct_mode = false;
+    drive_raw_output_mode = false;
+    drive_active = true;
+    heading_set_enabled(true);
+    heading_set_base_rpm(0.0f);
+
+    if (continuing_same_rotation == false)
+    {
+        heading_set_target(target_heading_deg);
+    }
 }
 
 /* 모터의 방향과 속도를 부호 있는 값 하나로 합쳐서 돌려주는 내부 함수 */
@@ -97,28 +257,149 @@ static float drive_count_to_mm(int32_t count)
         count = -count;
     }
 
-    return ((float)count / (float)DRIVE_SLOTS_PER_REV) * DRIVE_PI * DRIVE_WHEEL_DIA_MM;
+    return ((float)count / (float)ROVER_ENCODER_SLOTS_PER_REV)
+         * ROVER_PI
+         * ROVER_WHEEL_DIAMETER_MM;
 }
 
 
 /* 주행 모듈 초기화 */
-void drive_init(void)
+bool drive_init(void)
 {
-    wheel_init();
-    heading_init();
+    bool wheel_initialized = wheel_init();
+    bool heading_initialized = heading_init();
+
+    drive_initialized = wheel_initialized && heading_initialized;
 
     drive_wheel_accum = 0;
     drive_active = false;
+    drive_direct_mode = false;
+    drive_raw_output_mode = false;
     drive_speed = DRIVE_SPEED_NORMAL;
 
     drive_stop();
+
+    return drive_is_ready();
+}
+
+/* 차량을 세운 상태에서 MPU6050 초기화와 영점 보정을 다시 수행한다. */
+bool drive_retry_heading_init(void)
+{
+    bool heading_initialized;
+
+    drive_active = false;
+    drive_direct_mode = false;
+    drive_raw_output_mode = false;
+    drive_wheel_accum = 0;
+    wheel_stop();
+
+    heading_initialized = heading_init();
+    drive_initialized = motor_is_ready()
+                     && encoder_is_ready(ENCODER_LEFT)
+                     && encoder_is_ready(ENCODER_RIGHT)
+                     && heading_initialized;
+    drive_stop();
+
+    return drive_is_ready();
+}
+
+/* 모터·엔코더 피드백 오류 복구.
+ * MPU6050은 건드리지 않고 PWM과 TIM5 입력 캡처만 다시 시작한다. */
+bool drive_retry_motion_hardware(void)
+{
+    bool motor_initialized;
+    bool encoder_initialized;
+
+    drive_stop();
+    drive_active = false;
+    drive_direct_mode = false;
+    drive_raw_output_mode = false;
+    drive_wheel_accum = 0;
+
+    motor_initialized = motor_restart();
+    encoder_initialized = encoder_restart();
+    wheel_reset();
+
+    drive_initialized = motor_initialized
+                     && encoder_initialized
+                     && heading_is_sensor_ready();
+
+    return motor_initialized && encoder_initialized;
+}
+
+/* 초기화 성공과 가장 최근 MPU6050 갱신 상태를 함께 확인한다. */
+bool drive_is_ready(void)
+{
+    return drive_initialized && heading_is_sensor_ready();
+}
+
+bool drive_is_motor_ready(void)
+{
+    return motor_is_ready();
+}
+
+bool drive_is_left_encoder_ready(void)
+{
+    return encoder_is_ready(ENCODER_LEFT);
+}
+
+bool drive_is_right_encoder_ready(void)
+{
+    return encoder_is_ready(ENCODER_RIGHT);
+}
+
+bool drive_is_heading_ready(void)
+{
+    return heading_is_sensor_ready();
+}
+
+/* 명시적인 새 출발에서만 이전 모터 오류를 해제한다. */
+void drive_prepare_start(void)
+{
+    drive_active = false;
+    drive_raw_output_mode = false;
+    drive_wheel_accum = 0;
+    wheel_reset();
+    heading_stop();
 }
 
 /* 제어 주기마다 호출한다.
  * 자이로는 매번, 바퀴 속도 제어는 누적 시간이 찼을 때만 갱신한다. */
 void drive_update(uint32_t elapsed_time_ms)
 {
-    heading_update(elapsed_time_ms);
+    if (drive_raw_output_mode == true)
+    {
+        /* raw 모드에서는 자이로와 PID를 호출하지 않는다. 엔코더가 준비된 경우에만
+         * 실제 RPM을 로그로 볼 수 있도록 측정값만 갱신한다. */
+        drive_wheel_accum += elapsed_time_ms;
+        if (drive_wheel_accum >= DRIVE_WHEEL_PERIOD_MS)
+        {
+            if (encoder_is_ready(ENCODER_LEFT)
+                && encoder_is_ready(ENCODER_RIGHT))
+            {
+                encoder_update(drive_wheel_accum);
+            }
+            drive_wheel_accum = 0U;
+        }
+        return;
+    }
+
+    if (drive_direct_mode == true)
+    {
+        /* 회피 중에는 자세만 읽고 heading/wheel이 직접 출력을 덮지 않는다. */
+        (void)heading_update_measurement(elapsed_time_ms);
+    }
+    else
+    {
+        heading_update(elapsed_time_ms);
+    }
+
+    if (drive_is_ready() == false)
+    {
+        wheel_stop();
+        drive_wheel_accum = 0;
+        return;
+    }
 
     if (drive_active == false)
     {
@@ -131,7 +412,15 @@ void drive_update(uint32_t elapsed_time_ms)
 
     if (drive_wheel_accum >= DRIVE_WHEEL_PERIOD_MS)
     {
-        wheel_update(drive_wheel_accum);
+        if (drive_direct_mode == true)
+        {
+            /* 직접 출력 중에는 PID를 실행하지 않고 로그·정지 감시용 RPM만 갱신한다. */
+            encoder_update(drive_wheel_accum);
+        }
+        else
+        {
+            wheel_update(drive_wheel_accum);
+        }
         drive_wheel_accum = 0;
     }
 }
@@ -159,11 +448,11 @@ void drive_set_speed(uint8_t speed)
 
     if (base_rpm > 0.0f)
     {
-        heading_set_base_rpm(drive_duty_to_rpm(speed));
+        heading_set_base_rpm(drive_speed_to_rpm(speed));
     }
     else
     {
-        heading_set_base_rpm(-drive_duty_to_rpm(speed));
+        heading_set_base_rpm(-drive_speed_to_rpm(speed));
     }
 }
 
@@ -171,27 +460,51 @@ void drive_set_speed(uint8_t speed)
  * 기준 방향은 그대로 두므로 주행 중 방향이 틀어져도 스스로 복귀한다. */
 void drive_forward(uint8_t speed)
 {
+    if (drive_is_ready() == false)
+    {
+        drive_stop();
+        return;
+    }
+
     drive_speed = speed;
+    drive_direct_mode = false;
+    drive_raw_output_mode = false;
     drive_active = true;
 
     heading_set_enabled(true);
-    heading_set_base_rpm(drive_duty_to_rpm(speed));
+    heading_set_base_rpm(drive_speed_to_rpm(speed));
 }
 
 /* 설정된 속도로 차량을 후진 */
 void drive_backward(uint8_t speed)
 {
+    if (drive_is_ready() == false)
+    {
+        drive_stop();
+        return;
+    }
+
     drive_speed = speed;
+    drive_direct_mode = false;
+    drive_raw_output_mode = false;
     drive_active = true;
 
     heading_set_enabled(true);
-    heading_set_base_rpm(-drive_duty_to_rpm(speed));
+    heading_set_base_rpm(-drive_speed_to_rpm(speed));
 }
 
 /* 제자리에서 지정한 각도만큼 회전한다. (좌회전 +, 우회전 -)
  * 기본 속도를 0 으로 두면 방향 보정량만 남아 좌우가 반대로 돌게 된다. */
 void drive_rotate(float delta_deg)
 {
+    if (drive_is_ready() == false)
+    {
+        drive_stop();
+        return;
+    }
+
+    drive_direct_mode = false;
+    drive_raw_output_mode = false;
     drive_active = true;
 
     heading_set_enabled(true);
@@ -219,6 +532,8 @@ void drive_turn_right(uint8_t speed)
 void drive_stop(void)
 {
     drive_active = false;
+    drive_direct_mode = false;
+    drive_raw_output_mode = false;
     heading_set_enabled(false);
     heading_stop();
 }
@@ -266,4 +581,16 @@ int16_t drive_get_left_speed(void)
 int16_t drive_get_right_speed(void)
 {
     return drive_read_motor_speed(MOTOR_RIGHT);
+}
+
+/* 좌우 직접 출력 모드인지 반환한다. */
+bool drive_is_direct_mode(void)
+{
+    return drive_direct_mode;
+}
+
+/* 모터 단독 raw PWM 시험이 활성화됐는지 반환한다. */
+bool drive_is_raw_output_mode(void)
+{
+    return drive_raw_output_mode;
 }

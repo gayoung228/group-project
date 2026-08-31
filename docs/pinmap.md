@@ -10,7 +10,7 @@
 - DC 기어 모터 2개
 - HC-020K 휠 엔코더 2개
 - MPU6050
-- VL53L0X 3개
+- VL53L0X 거리 센서 3개(왼쪽 45도·정면·오른쪽 45도)
 - IR 리모컨 수신기
 - ST-LINK Virtual COM Port
 
@@ -27,8 +27,8 @@
 | 모터 드라이버 활성화 | `MOTOR_STBY` | D3 | PB3 | GPIO Output Push-Pull | TB6612FNG STBY |
 | 왼쪽 엔코더 펄스 | — | A0 | PA0 | TIM5_CH1 Input Capture | 왼쪽 HC-020K OUT |
 | 오른쪽 엔코더 펄스 | — | A1 | PA1 | TIM5_CH2 Input Capture | 오른쪽 HC-020K OUT |
-| I2C Clock | — | D15 | PB8 | I2C1_SCL | MPU6050 및 VL53L0X 3개 SCL |
-| I2C Data | — | D14 | PB9 | I2C1_SDA | MPU6050 및 VL53L0X 3개 SDA |
+| I2C Clock | — | D15 | PB8 | I2C1_SCL | MPU6050 및 VL53L0X SCL |
+| I2C Data | — | D14 | PB9 | I2C1_SDA | MPU6050 및 VL53L0X SDA |
 | 왼쪽 거리 센서 종료 제어 | `TOF_LEFT_XSHUT` | A2 | PA4 | GPIO Output Open-Drain | 왼쪽 VL53L0X XSHUT |
 | 정면 거리 센서 종료 제어 | `TOF_FRONT_XSHUT` | D2 | PA10 | GPIO Output Open-Drain | 정면 VL53L0X XSHUT |
 | 오른쪽 거리 센서 종료 제어 | `TOF_RIGHT_XSHUT` | A3 | PB0 | GPIO Output Open-Drain | 오른쪽 VL53L0X XSHUT |
@@ -125,7 +125,8 @@ HAL_TIM_IC_Start_IT(&htim4, TIM_CHANNEL_1);
 
 ## I2C 센서 연결
 
-MPU6050과 VL53L0X 3개는 하나의 I2C1 버스를 공유한다.
+MPU6050과 VL53L0X 세 개는 하나의 I2C1 버스를 공유한다. SDA/SCL은 병렬로
+연결하고 각 VL53L0X의 XSHUT으로 주소를 나눈다.
 
 ```text
 PB8 / D15 → MPU6050 SCL
@@ -159,7 +160,7 @@ PA10 / D2 → VL53L0X FRONT XSHUT
 PB0  / A3 → VL53L0X RIGHT XSHUT
 ```
 
-세 XSHUT 핀의 공통 설정:
+세 XSHUT 핀의 공통 설정은 다음과 같다.
 
 ```text
 GPIO Mode        : Output Open-Drain
@@ -168,7 +169,7 @@ Pull-up/down     : No Pull
 Maximum Speed    : Low
 ```
 
-VL53L0X 3개는 전원을 켤 때 기본 I2C 주소가 같으므로 다음 순서로 초기화한다.
+세 VL53L0X는 전원을 켤 때 기본 I2C 주소가 같으므로 다음 순서로 초기화한다.
 
 ```text
 모든 XSHUT LOW
