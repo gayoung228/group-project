@@ -16,6 +16,27 @@ MPU6050으로 진행 방향을 보정하며, VL53L0X 3개와 IR 리모컨으로 
 - 주행 불능 오류 시 긴급정지·하드웨어 재시동·Z/START 재출발 안내
 - 센서 초기화 결과와 주행 상태를 USART2 로그로 출력
 
+## 시연 영상
+
+### PID 기반 직진 보정
+엔코더로 측정한 좌우 바퀴 속도와 MPU6050의 방향 정보를 이용해
+직진 주행을 보정하는 영상입니다.
+<img width="400" height="400" alt="PID_OFF_ON" src="https://github.com/user-attachments/assets/76a44b00-babc-426e-9e57-252335361766" />
+
+### 장애물 판단 및 회피
+좌·정면·우 거리센서로 장애물을 감지하고,
+더 넓은 방향을 선택해 회피하는 영상입니다.
+<img width="400" height="400" alt="장애물 판단" src="https://github.com/user-attachments/assets/70ce4938-a274-4442-9284-2226801bbdbe" />
+
+### 과속방지턱 통과
+과속방지턱의 오르막과 내리막을 감지하고,
+상태에 따라 주행을 제어하는 영상입니다.
+<img width="400" height="439" alt="방지턱" src="https://github.com/user-attachments/assets/3bbfaba0-c09e-4694-9a69-8f9ec7e2008b" />
+
+### 전체 시연
+<img width="400" height="225" alt="전체" src="https://github.com/user-attachments/assets/f70b4072-c0fa-42ff-9821-10619242b45c" />
+
+
 ## 코드 구조
 
 ```text
