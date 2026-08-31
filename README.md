@@ -19,17 +19,18 @@ MPU6050으로 진행 방향을 보정하며, VL53L0X 3개와 IR 리모컨으로 
 ## 시연 영상
 
 ### PID 기반 직진 보정
-엔코더로 측정한 좌우 바퀴 속도와 MPU6050의 방향 정보를 이용해
+- 엔코더로 측정한 좌우 바퀴 속도와 MPU6050의 방향 정보를 이용해
 직진 주행을 보정하는 영상입니다.
+- 좌 : PID 보정 OFF | 우 : PID 보정 ON
 <img width="400" height="400" alt="PID_OFF_ON" src="https://github.com/user-attachments/assets/76a44b00-babc-426e-9e57-252335361766" />
 
 ### 장애물 판단 및 회피
-좌·정면·우 거리센서로 장애물을 감지하고,
+- 좌·정면·우 거리센서로 장애물을 감지하고,
 더 넓은 방향을 선택해 회피하는 영상입니다.
 <img width="400" height="400" alt="장애물 판단" src="https://github.com/user-attachments/assets/70ce4938-a274-4442-9284-2226801bbdbe" />
 
 ### 과속방지턱 통과
-과속방지턱의 오르막과 내리막을 감지하고,
+- 과속방지턱의 오르막과 내리막을 감지하고,
 상태에 따라 주행을 제어하는 영상입니다.
 <img width="400" height="439" alt="방지턱" src="https://github.com/user-attachments/assets/3bbfaba0-c09e-4694-9a69-8f9ec7e2008b" />
 
